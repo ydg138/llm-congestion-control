@@ -1,10 +1,10 @@
-"""컨트롤러 C0·C1·C2를 손으로 계산한 값으로 확인한다."""
+"""컨트롤러 C0·C1·C2·C4·C5를 손으로 계산한 값으로 확인한다."""
 
 import pytest
 
 from client.controllers import (
-    AIMDConfig, AIMDWindow, BackoffConfig, DelayBased, DelayConfig, FixedBackoff, FixedConfig,
-    FixedWindow,
+    AIMDConfig, AIMDWindow, BackoffConfig, DelayBased, DelayConfig, ExplicitAIMD, FixedBackoff,
+    FixedConfig, FixedWindow,
 )
 from client.factory import NAMES, make_controller
 
@@ -162,6 +162,73 @@ def test_c4_state_has_ttft():
     c.on_success(c.on_send(), ok(0.1))
     s = c.state()
     assert s["min_ttft"] == 0.1 and s["ttft_ewma"] == 0.1
+
+
+# ---------- C5 ----------
+
+class FakeClock:
+    """테스트에서 시각을 직접 정하는 시계."""
+    def __init__(self, now):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+
+def test_c5_pauses_for_retry_after():
+    clock = FakeClock(10.0)
+    c = ExplicitAIMD(AIMDConfig(init_cwnd=8, ssthresh=32), clock=clock)
+    for no in send_all(c):                                # 8개 모두 429, 10.0 + 0.5 = 10.5까지 쉼
+        c.on_rate_limited(no, 0.5)
+    assert c.cwnd == 4 and c.in_flight == 0               # C2와 같이 절반 (같은 바퀴는 한 번)
+    clock.now = 10.3
+    assert not c.can_send()
+    clock.now = 10.5
+    assert c.can_send()
+
+
+def test_c5_no_retry_after_no_pause():
+    c = ExplicitAIMD(AIMDConfig(init_cwnd=2, ssthresh=32), clock=FakeClock(10.0))
+    for no in send_all(c):                                # 요청 1·2 모두 retry_after 없는 429
+        c.on_rate_limited(no, None)
+    assert c.cwnd == 1 and c.pause_until == 0.0
+    assert c.can_send()                                   # 쉬지 않고 바로 보냄 (C2와 같음)
+
+
+def test_c5_same_round_pause_extends_but_halves_once():
+    clock = FakeClock(10.0)
+    c = ExplicitAIMD(AIMDConfig(init_cwnd=8, ssthresh=32), clock=clock)
+    nos = send_all(c)
+    c.on_rate_limited(nos[0], 0.5)
+    c.on_rate_limited(nos[1], 0.8)
+    assert c.cwnd == 4                                    # 한 번만 절반
+    assert c.pause_until == pytest.approx(10.8)           # 더 늦은 쪽까지 쉼
+
+
+def test_c5_remaining_header_caps_window():
+    c = ExplicitAIMD(AIMDConfig(init_cwnd=8, ssthresh=4), clock=FakeClock(0.0))
+    nos = [c.on_send() for _ in range(4)]                 # 4개 보냄
+    c.on_success(nos[0], {"headers": {"X-RateLimit-Remaining": "2"}})
+    assert c.limit == 5                                   # 기다리는 3 + 남은 2
+    assert send_all(c) == [5, 6]                          # cwnd는 8이지만 5개까지만
+    assert c.in_flight == 5 and not c.can_send()
+
+
+def test_c5_zero_remaining_still_sends_one_when_idle():
+    c = ExplicitAIMD(AIMDConfig(init_cwnd=4, ssthresh=32), clock=FakeClock(0.0))
+    c.on_success(c.on_send(), {"headers": {"x-ratelimit-remaining": "0"}})
+    assert c.limit == 0 and c.in_flight == 0
+    assert c.can_send()                                   # 멈춤 방지: 1개는 보냄
+    c.on_send()
+    assert not c.can_send()
+
+
+def test_c5_without_headers_acts_like_c2():
+    c = ExplicitAIMD(AIMDConfig(init_cwnd=1, ssthresh=32), clock=FakeClock(0.0))
+    for _ in range(3):
+        for no in send_all(c):
+            c.on_success(no, {})
+    assert c.cwnd == 8 and c.limit is None                # 1 → 2 → 4 → 8
 
 
 # ---------- factory ----------
