@@ -43,6 +43,15 @@ class AIMDConfig:
     max_window: float = 128.0   # 윈도 상한
 
 
+@dataclass(frozen=True)
+class DelayConfig:
+    init_cwnd: float = 4.0      # 처음 윈도
+    alpha: float = 0.125        # TTFT EWMA 가중치 (TCP RTT 추정과 같은 1/8)
+    headroom: float = 1.0       # 한 바퀴마다 더하는 여유 (안 붐비면 +1)
+    min_gradient: float = 0.5   # 한 번에 최대 절반까지만 줄임
+    max_window: float = 128.0   # 윈도 상한
+
+
 # ---------- 공통 뼈대 ----------
 
 class BaseController:
@@ -147,3 +156,64 @@ class AIMDWindow(BaseController):
         self.ssthresh = max(self.cwnd / 2, 1.0)
         self.cwnd = self.ssthresh           # 곱셈 감소: 절반으로
         self.recover_until = self.sent      # 지금까지 보낸 요청은 같은 바퀴
+
+
+# ---------- C4: 지연 기반 (TCP Vegas, 넷플릭스 gradient) ----------
+
+class DelayBased(BaseController):
+    """TTFT가 늘기 시작하면 429·529가 오기 전에 미리 윈도를 줄인다.
+
+    TTFT에는 서버 대기열에서 기다린 시간이 들어 있어 붐비면 늘어난다.
+    전체 응답 시간은 출력이 길어도 늘어나므로 혼잡 신호로 쓰지 않는다.
+    """
+
+    def __init__(self, cfg: DelayConfig | None = None):
+        self.cfg = cfg or DelayConfig()
+        super().__init__(cwnd=float(self.cfg.init_cwnd))
+        self.min_ttft = None    # 지금까지 본 가장 작은 TTFT = 안 붐빌 때 (Vegas의 BaseRTT)
+        self.ttft_ewma = None   # 최근 TTFT의 지수 이동 평균
+        self.round_end = 0      # 이 번호까지는 이미 조정한 바퀴로 본다
+        self.recover_until = 0  # 이 번호까지는 이미 줄인 바퀴로 본다 (429·529용)
+
+    def on_success(self, req_no: int, resp: dict | None = None) -> None:
+        self._release()
+        ttft = (resp or {}).get("ttft_seconds")
+        if ttft is None:
+            return
+        self._update_ttft(ttft)
+        if req_no <= self.round_end:        # 윈도 조정은 한 바퀴에 한 번
+            return
+        gradient = self.min_ttft / self.ttft_ewma if self.ttft_ewma > 0 else 1.0
+        gradient = max(self.cfg.min_gradient, min(1.0, gradient))
+        # 넷플릭스 gradient: 안 붐비면(1.0) +headroom, TTFT가 늘어난 만큼 줄임
+        self.cwnd = self.cwnd * gradient + self.cfg.headroom
+        self.cwnd = max(1.0, min(self.cwnd, self.cfg.max_window))
+        self.round_end = self.sent          # 지금까지 보낸 요청은 같은 바퀴
+
+    def _update_ttft(self, ttft: float) -> None:
+        if self.ttft_ewma is None:
+            self.min_ttft = self.ttft_ewma = ttft
+            return
+        self.min_ttft = min(self.min_ttft, ttft)
+        a = self.cfg.alpha
+        self.ttft_ewma = (1 - a) * self.ttft_ewma + a * ttft   # EWMA: 4주차 RTT 추정과 같은 방식
+
+    def on_rate_limited(self, req_no: int, retry_after: float | None = None) -> None:
+        self._release()
+        self._decrease(req_no)              # 지연 신호가 놓친 경우의 안전장치 (Vegas도 손실에 반응)
+
+    def on_overloaded(self, req_no: int) -> None:
+        self._release()
+        self._decrease(req_no)
+
+    def _decrease(self, req_no: int) -> None:
+        if req_no <= self.recover_until:    # 같은 바퀴의 손실은 한 번만 반영
+            return
+        self.cwnd = max(self.cwnd / 2, 1.0) # 곱셈 감소: 절반으로
+        self.recover_until = self.sent
+        self.round_end = self.sent          # 이번 바퀴에는 지연으로 다시 조정하지 않음
+
+    def state(self) -> dict:
+        s = super().state()
+        s.update(min_ttft=self.min_ttft, ttft_ewma=self.ttft_ewma)   # E5 그래프용
+        return s

@@ -7,11 +7,12 @@
 """
 
 from client.controllers import (
-    AIMDConfig, AIMDWindow, BackoffConfig, FixedBackoff, FixedConfig, FixedWindow,
+    AIMDConfig, AIMDWindow, BackoffConfig, DelayBased, DelayConfig, FixedBackoff, FixedConfig,
+    FixedWindow,
 )
 
 # E1에서 이름만 바꿔 돌릴 수 있는 목록
-NAMES = ("C0-1", "C0-8", "C0-32", "C0-64", "C1", "C2")
+NAMES = ("C0-1", "C0-8", "C0-32", "C0-64", "C1", "C2", "C4")
 
 
 def make_controller(name: str, seed: int = 0, **params):
@@ -28,4 +29,6 @@ def make_controller(name: str, seed: int = 0, **params):
         return FixedBackoff(BackoffConfig(**params))
     if kind == "C2":
         return AIMDWindow(AIMDConfig(**params))
+    if kind == "C4":
+        return DelayBased(DelayConfig(**params))
     raise ValueError(f"알 수 없는 컨트롤러 이름: {name}")
