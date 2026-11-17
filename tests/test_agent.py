@@ -83,6 +83,7 @@ def test_retry_goes_before_new_task(tmp_path):
     assert [r["cwnd"] for r in rows] == ["1.0", "2.0", "2.5"]
     assert rows[1]["ttft_ms"] == "2.0"
     assert progress.active == 0 and progress.last_success > progress.started
+    assert progress.completed == 2                  # 429는 세지 않음
 
 
 class FailOnTaskLog:

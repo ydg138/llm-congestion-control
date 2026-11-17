@@ -6,9 +6,9 @@
 
 결과 (results/ 아래):
     <exp>_<controller>_seed<seed>_<run_id>.csv          요청 로그 (docs/interface.md 3절)
-    <exp>_<controller>_seed<seed>_<run_id>_stats.json   실행이 끝난 뒤의 서버 /stats
+    <exp>_<controller>_seed<seed>_<run_id>_stats.json   맨 위 runner(실행 결과 상태) + 서버 /stats
     server/                                             서버 CSV와 서버 콘솔 출력
-안전장치로 멈추거나 /stats를 못 받으면 이유를 stderr에 쓰고 종료 코드 1로 끝난다.
+runner.status가 aborted이거나 /stats를 못 받으면 이유를 stderr에 쓰고 종료 코드 1로 끝난다.
 """
 
 import argparse
@@ -33,9 +33,9 @@ def default_agents(controller: str) -> list[AgentSpec]:
     return [AgentSpec("a1", "light", controller, 0.0)]
 
 
-async def run_agents(agents, n_tasks: int, seed: int, base_url: str, log, limits: Limits) -> None:
+async def run_agents(agents, n_tasks: int, seed: int, base_url: str, log, limits: Limits,
+                     progress: Progress) -> None:
     """모든 에이전트를 함께 돌린다. 안전장치가 먼저 걸리면 에이전트를 멈추고 RunAborted를 올린다."""
-    progress = Progress(time.perf_counter())                # 실험 시작 시각
     runs = [Agent(spec, make_tasks(spec.agent_id, spec.agent_class, n_tasks, seed),
                   make_controller(spec.controller, seed=seed * 1000 + i),  # C1 지터가 에이전트끼리 같지 않게
                   base_url, log, progress).run()
@@ -51,13 +51,35 @@ async def run_agents(agents, n_tasks: int, seed: int, base_url: str, log, limits
     work.result()                                           # 에이전트에서 난 예외
 
 
-def save_stats(base_url: str, path: Path) -> dict | None:
-    """/stats를 JSON으로 저장하고 돌려준다. 서버가 답하지 않으면 None."""
+def run_experiment(agents, n_tasks: int, seed: int, base_url: str, log, limits: Limits) -> dict:
+    """에이전트를 끝까지 돌리고 실행 결과 상태 {"status", "reason"}를 돌려준다.
+
+    completed: 모든 작업이 200으로 끝남
+    aborted: 안전장치로 멈췄거나, 422·타임아웃·연결 오류로 포기한 작업이 있음
+    코드 오류·Ctrl+C는 그대로 올린다 (main이 aborted로 기록한다).
+    """
+    progress = Progress(time.perf_counter())                # 실험 시작 시각
+    try:
+        asyncio.run(run_agents(agents, n_tasks, seed, base_url, log, limits, progress))
+    except RunAborted as e:
+        return {"status": "aborted", "reason": f"안전장치: {e}"}
+    total = len(agents) * n_tasks
+    if progress.completed < total:
+        return {"status": "aborted", "reason": f"작업 {progress.completed}/{total}만 성공"}
+    return {"status": "completed", "reason": None}
+
+
+def save_stats(base_url: str, path: Path, outcome: dict) -> dict | None:
+    """맨 위에 runner(실행 결과 상태)를 두고 서버 /stats를 이어 붙여 저장한다.
+
+    서버가 답하지 않아도 runner는 저장한다. 돌려주는 값은 /stats (못 받았으면 None).
+    """
     try:
         stats = get_json(base_url, "/stats")
     except OSError:
-        return None
-    path.write_text(json.dumps(stats, ensure_ascii=False, indent=2), encoding="utf-8")
+        stats = None
+    doc = {"runner": outcome, **(stats if stats is not None else {"error": "/stats 응답 없음"})}
+    path.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
     return stats
 
 
@@ -96,21 +118,23 @@ def main(argv=None) -> int:
         stats_path = csv_path.with_name(csv_path.stem + "_stats.json")
         log = RequestLog(csv_path, run_id, args.exp, args.seed)
         try:
-            asyncio.run(run_agents(agents, args.tasks, args.seed, base_url, log, limits))
-        except RunAborted as e:
-            problems.append(f"안전장치로 멈춤: {e}")
+            outcome = run_experiment(agents, args.tasks, args.seed, base_url, log, limits)
+        except BaseException as e:                          # 코드 오류·Ctrl+C도 aborted로 남기고 그대로 올린다
+            outcome = {"status": "aborted", "reason": f"예외: {type(e).__name__}: {e}"}
+            raise
         finally:                                            # 어떻게 끝나든 로그를 닫고 /stats를 남긴다
             log.close()
-            stats = save_stats(base_url, stats_path)
+            stats = save_stats(base_url, stats_path, outcome)
     finally:
         stop_server(proc, port)                             # 어떻게 끝나든 서버는 반드시 끈다
     print(f"요청 로그: {csv_path}")
+    print(f"서버 통계: {stats_path}")
+    if outcome["status"] == "aborted":
+        problems.append(outcome["reason"])
     if stats is None:
         problems.append("/stats 저장 실패 (서버가 답하지 않음)")
-    else:
-        print(f"서버 통계: {stats_path}")
-        if problems:
-            problems.append(f"서버 기준 완료 {stats['completed']}/{len(agents) * args.tasks}")
+    elif problems:
+        problems.append(f"서버 기준 완료 {stats['completed']}/{len(agents) * args.tasks}")
     if problems:
         print("; ".join(problems), file=sys.stderr)
         return 1

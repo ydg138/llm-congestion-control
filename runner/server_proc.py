@@ -41,7 +41,8 @@ def start_server(server_dir: Path, config: Path | None, log_dir: Path, port: int
     python = server_dir / ".venv" / "Scripts" / "python.exe"
     if not python.is_file():
         raise FileNotFoundError(f"서버 venv가 없음: {python} (서버의 docs/SERVER_README.md 참고)")
-    cmd = [str(python), "-m", "server.mock_llm", "--port", str(port),
+    # -u: 출력 버퍼를 끈다. 강제 종료해도 그때까지 서버가 쓴 출력(실행 중 오류 포함)이 파일에 남는다
+    cmd = [str(python), "-u", "-m", "server.mock_llm", "--port", str(port),
            "--log-dir", str(log_dir.resolve())]
     if config is not None:
         cmd += ["--config", str(config.resolve())]

@@ -38,6 +38,7 @@ class Progress:
         self.last_success = now     # 마지막 200을 받은 시각
         self.active = 0             # 시작했고 아직 끝나지 않은 에이전트 수
         self.busy_since = now       # active가 0에서 1이 된 시각
+        self.completed = 0          # 200을 받은 작업 수 (모든 에이전트 합)
 
     def agent_started(self, now: float) -> None:
         if self.active == 0:
@@ -49,6 +50,7 @@ class Progress:
 
     def on_success(self, now: float) -> None:
         self.last_success = now
+        self.completed += 1
 
 
 def report(controller, req_no: int, status, resp: dict) -> bool:
