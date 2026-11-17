@@ -17,6 +17,7 @@ Retry-After 헤더는 1초 이상 정수로 올림돼 있어 쓰지 않는다.
 """
 
 import random
+import time
 from dataclasses import dataclass
 
 
@@ -216,4 +217,56 @@ class DelayBased(BaseController):
     def state(self) -> dict:
         s = super().state()
         s.update(min_ttft=self.min_ttft, ttft_ewma=self.ttft_ewma)   # E5 그래프용
+        return s
+
+
+# ---------- C5: AIMD + 명시적 신호 (ECN과 비교) ----------
+
+def _header(resp: dict | None, name: str):
+    """resp["headers"]에서 대소문자 구분 없이 헤더 값을 찾는다. 없으면 None."""
+    headers = (resp or {}).get("headers") or {}
+    for key, value in headers.items():
+        if key.lower() == name.lower():
+            return value
+    return None
+
+
+class ExplicitAIMD(AIMDWindow):
+    """C2를 그대로 쓰고, 서버가 알려 주는 두 가지 신호를 더한다.
+
+    - 429의 retry_after: 그 시간 동안 새 요청을 아예 보내지 않는다
+    - 200의 X-RateLimit-Remaining: 남은 요청 수만큼만 더 보낸다
+
+    실행기는 on_success에 resp = {**본문, "headers": 응답 헤더}를 넘긴다.
+    시간은 clock()으로 읽는다. 테스트에서는 가짜 시계를 넣는다.
+    """
+
+    def __init__(self, cfg: AIMDConfig | None = None, clock=time.monotonic):
+        super().__init__(cfg)
+        self.clock = clock
+        self.pause_until = 0.0  # 이 시각 전에는 보내지 않는다 (retry-after)
+        self.limit = None       # 남은 한도로 정한 동시 요청 상한 (None이면 상한 없음)
+
+    def can_send(self, est_tokens: int = 0) -> bool:
+        if self.clock() < self.pause_until:         # 서버가 기다리라고 한 시간
+            return False
+        if self.limit is not None and self.in_flight > 0 and self.in_flight >= self.limit:
+            return False                            # 남은 한도만큼 이미 보냄 (기다리는 요청이 없으면 1개는 허용)
+        return super().can_send(est_tokens)
+
+    def on_success(self, req_no: int, resp: dict | None = None) -> None:
+        super().on_success(req_no, resp)            # C2와 같이 cwnd를 늘림
+        remaining = _header(resp, "X-RateLimit-Remaining")
+        if remaining is not None:
+            # ECN처럼 서버가 알려 준 여유: 지금 기다리는 요청 + 남은 요청 수까지만
+            self.limit = self.in_flight + int(float(remaining))
+
+    def on_rate_limited(self, req_no: int, retry_after: float | None = None) -> None:
+        super().on_rate_limited(req_no, retry_after)    # C2와 같이 절반 (같은 바퀴는 한 번)
+        if retry_after:
+            self.pause_until = max(self.pause_until, self.clock() + retry_after)
+
+    def state(self) -> dict:
+        s = super().state()
+        s.update(limit=self.limit, pause_until=self.pause_until)
         return s
