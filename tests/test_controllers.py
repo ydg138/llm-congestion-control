@@ -3,7 +3,8 @@
 import pytest
 
 from client.controllers import (
-    AIMDConfig, AIMDWindow, BackoffConfig, FixedBackoff, FixedConfig, FixedWindow,
+    AIMDConfig, AIMDWindow, BackoffConfig, DelayBased, DelayConfig, FixedBackoff, FixedConfig,
+    FixedWindow,
 )
 from client.factory import NAMES, make_controller
 
@@ -104,6 +105,63 @@ def test_c1_jitter_within_range_and_same_seed_same_values():
     b = FixedBackoff(cfg).wait_before_retry(3)
     assert a == b                           # 같은 시드면 같은 지터
     assert 3.6 <= a <= 4.4                  # 4초 ± 10%
+
+
+# ---------- C4 ----------
+
+def ok(ttft):
+    """서버 200 응답 본문 중 C4가 읽는 부분."""
+    return {"ttft_seconds": ttft}
+
+
+def test_c4_ewma():
+    c = DelayBased()
+    c.on_success(c.on_send(), ok(0.1))
+    assert c.ttft_ewma == 0.1 and c.min_ttft == 0.1      # 첫 값은 그대로
+    c.on_success(c.on_send(), ok(0.2))
+    assert c.ttft_ewma == pytest.approx(0.1125)           # 0.1 + 0.125 × (0.2 - 0.1)
+    assert c.min_ttft == 0.1
+
+
+def test_c4_no_congestion_plus_one_per_round():
+    c = DelayBased(DelayConfig(init_cwnd=4))
+    for no in send_all(c):                                # 요청 1~4, TTFT 그대로
+        c.on_success(no, ok(0.1))
+    assert c.cwnd == 5                                    # 4 × 1.0 + 1, 한 바퀴에 한 번만
+
+
+def test_c4_congestion_reduces_by_gradient():
+    c = DelayBased(DelayConfig(init_cwnd=8))
+    c.min_ttft, c.ttft_ewma = 0.1, 0.2                    # TTFT가 기준의 2배
+    c.on_success(c.on_send(), ok(0.2))                    # EWMA는 0.2 그대로
+    assert c.cwnd == pytest.approx(5)                     # 8 × 0.5 + 1
+
+
+def test_c4_gradient_clamped_at_half():
+    c = DelayBased(DelayConfig(init_cwnd=8))
+    c.min_ttft, c.ttft_ewma = 0.1, 0.5                    # 계산상 0.2
+    c.on_success(c.on_send(), ok(0.5))
+    assert c.cwnd == pytest.approx(5)                     # 0.5로 막혀 8 × 0.5 + 1
+
+
+def test_c4_429_halves_once_per_round():
+    c = DelayBased(DelayConfig(init_cwnd=8))
+    for no in send_all(c):                                # 요청 1~8 모두 429
+        c.on_rate_limited(no, 0.1)
+    assert c.cwnd == 4
+
+
+def test_c4_ignores_response_without_ttft():
+    c = DelayBased(DelayConfig(init_cwnd=4))
+    c.on_success(c.on_send(), {})
+    assert c.cwnd == 4 and c.ttft_ewma is None and c.in_flight == 0
+
+
+def test_c4_state_has_ttft():
+    c = DelayBased()
+    c.on_success(c.on_send(), ok(0.1))
+    s = c.state()
+    assert s["min_ttft"] == 0.1 and s["ttft_ewma"] == 0.1
 
 
 # ---------- factory ----------
