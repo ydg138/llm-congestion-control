@@ -26,24 +26,31 @@
 
 ### 1) 가짜 서버 HTTP API (P1이 만들고 P2·P3가 씀)
 
-```
-POST /v1/messages
-요청 본문(JSON):
-  agent_id        문자열    어느 에이전트인지 (공정성 계산용)
-  task_id         정수      작업 번호
-  input_tokens    정수      입력 토큰 수 (클라이언트가 정함)
-  max_tokens      정수      출력 상한
-응답:
-  200  {"output_tokens": 정수, "ttft_ms": 실수, "total_ms": 실수}
-  429  {"error": "rate_limit_error"}       헤더 retry-after: 초(실수)
-  529  {"error": "overloaded_error"}
-모든 응답 헤더 (C5용, 목표 단계):
-  ratelimit-remaining-requests
-  ratelimit-remaining-input-tokens
-  ratelimit-remaining-output-tokens
+**11/11 확정: P1 서버 API 2.0을 그대로 따른다.** 상세는 서버 저장소의 `docs/API.md`. 아래는 P2·P3가 쓰는 부분만 요약.
 
-POST /admin/config      실행 중 한도·용량 변경 (E2, E5용, 목표 단계)
 ```
+POST /generate
+요청 본문(JSON):
+  request_id         문자열    시도마다 새로 (재시도도 새 값)
+  agent_id           문자열    어느 에이전트인지 (공정성 계산용)
+  workload_id        문자열    작업 번호. 재시도해도 같은 값 → 같은 출력 길이
+  input_tokens       정수      입력 토큰 수
+  max_output_tokens  정수      출력 상한. 재시도해도 같은 값
+응답:
+  200  output_tokens, ttft_seconds(대기 포함), queue_wait_seconds, server_elapsed_seconds 등
+  429  error=rate_limit_exceeded, limited_by, retry_after_seconds(실수)
+  529  error=server_overloaded      (대기열까지 가득, 한도 헤더 없음)
+  422  error=request_exceeds_capacity  (기다려도 불가능 → 혼잡 아님, on_error)
+남은 한도 헤더 (200·429):
+  X-RateLimit-Remaining, X-InputTokenLimit-Remaining, X-OutputTokenLimit-Remaining
+  (각각 -Limit도 있음)
+
+POST /admin/config      실행 중 한도·용량 변경 (MOCK_LLM_ADMIN_TOKEN 필요)
+```
+
+- 컨트롤러에 넘기는 `retry_after`는 **본문 `retry_after_seconds`**. `Retry-After` 헤더는 1초 이상 정수로 올림돼 있어 쓰지 않는다.
+- 출력 토큰은 서버가 입장할 때 `max_output_tokens`만큼 예약하고, 끝나면 실제량으로 정산한다 (C3 설계 때 P1과 다시 논의).
+- 서버를 재시작하면 버킷·통계가 초기화되고 새 `run_id`(헤더 `X-Run-Id`)가 생긴다.
 
 - 서버는 텍스트를 만들지 않는다. 계산한 지연만큼 기다린 뒤 응답한다.
 - 10주차에는 RPM 버킷 하나만. ITPM·OTPM은 13주차에 추가.
@@ -61,7 +68,8 @@ class Controller:
     def on_success(self, req_no: int, resp: dict) -> None: ...
     def on_rate_limited(self, req_no: int, retry_after: float | None) -> None: ...   # 429
     def on_overloaded(self, req_no: int) -> None: ...            # 529
-    def wait_before_retry(self, attempt: int) -> float: ...       # 재시도 전 대기 초 (C1 백오프용, 나머지는 0)
+    def on_error(self, req_no: int) -> None: ...                 # 422·타임아웃·연결 오류 (윈도 그대로, in_flight만 감소)
+    def wait_before_retry(self, attempt: int) -> float: ...       # 재시도 전 대기 초 (attempt: 첫 재시도=1, C1 백오프용, 나머지는 0)
     def state(self) -> dict: ...                                  # 로그용: {"cwnd": ..., "in_flight": ..., "ssthresh": ...}
 ```
 
