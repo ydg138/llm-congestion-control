@@ -4,10 +4,10 @@
 
 ## 프로젝트
 
-**Congestion Control for LLM Agents: Applying TCP AIMD to API Rate Limits**
+**Token-Fair Congestion Control for LLM Agents: Decentralized AIMD under Unknown Output Length**
 2026-2 컴퓨터네트워크 팀 프로젝트 (팀 NetDoctors, 최종 발표 12/8).
 
-여러 LLM 에이전트가 API 요청·토큰 한도를 나눠 쓸 때 생기는 429 폭주와 한도 독점을, TCP 혼잡 제어(슬로 스타트, AIMD, 지연 기반 제어, ECN 같은 명시적 신호)로 푼다. 실험은 대부분 가짜 LLM 서버에서 하고, 마지막에 로컬 LLM 서버와 실제 API로 짧게 검증한다.
+여러 LLM 에이전트가 API 요청·토큰 한도를 나눠 쓸 때 생기는 429 폭주와 한도 독점을 TCP 혼잡 제어(슬로 스타트, AIMD, 지연 기반 제어, ECN 같은 명시적 신호)로 푼다. **연구 질문(11/17)**: 서버를 고치지 않고 중앙 조정자 없이, 요청 크기가 다른 에이전트들이 토큰 한도를 공정하게 나눠 쓸 수 있는가. 요청 수 AIMD(C2)는 토큰으로는 불공정하므로, 출력 길이를 모르는 상태에서 동작하는 토큰 가중 AIMD(C3)를 제안하고 E4에서 비교한다. 실험은 대부분 가짜 LLM 서버에서 하고, 마지막에 로컬 LLM 서버와 실제 API로 짧게 검증한다.
 
 | TCP | 이 프로젝트 |
 | --- | --- |
@@ -88,4 +88,4 @@ docs/       설계 문서
 
 ## 현재 단계
 
-12주차: 최소 단계 관문(E1·E3가 명령 하나로 5회 반복). 자세한 할 일은 `docs/week12.md`, 지난 주차 기록은 `docs/week10.md`.
+12주차: 최소 단계 관문(E1·E3가 명령 하나로 5회 반복). 13주차부터 C3와 E4(토큰 공정성)가 핵심. 자세한 할 일은 `docs/week12.md`, 지난 주차 기록은 `docs/week10.md`.

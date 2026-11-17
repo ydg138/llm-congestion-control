@@ -68,18 +68,26 @@ class Controller:
 | `on_error` | 혼잡 신호가 아니므로 윈도는 그대로, `in_flight`만 줄인다 |
 | `attempt` | 이번이 몇 번째 재시도인지. 첫 재시도가 1 (C1 백오프용, 나머지는 0초) |
 | `state()` | 항상 `cwnd`, `in_flight`, `ssthresh`. C4는 `min_ttft`, `ttft_ewma`, C5는 `limit`, `pause_until`을 더한다 |
+| `est_tokens` | C3만 쓴다. 실행기는 `can_send`·`on_send`에 이번 요청의 `input_tokens + max_output_tokens`를 넘긴다. 다른 컨트롤러는 무시한다 |
 
 컨트롤러 이름: `C0-1`, `C0-8`, `C0-32`, `C0-64`, `C1`, `C2`, `C4`, `C5` (C3는 13주차). 설명은 `docs/controllers.md`.
+
+C3가 들어오면 `on_success`의 `resp`에서 실제 `output_tokens`를 읽어 예약을 정산한다. 실행기 쪽 변경은 위 `est_tokens`를 넘기는 것뿐이다. 세부는 C3 설계 때 이 절에 추가한다.
 
 ## 3. 요청 로그 CSV
 
 요청 한 번(재시도 포함 각 시도)마다 한 줄.
 
 ```
-run_id, exp, controller, seed, agent_id, task_id, req_no, attempt,
-t_send, t_done, status, input_tokens, output_tokens, ttft_ms, latency_ms,
+run_id, exp, controller, seed, agent_id, agent_class, task_id, req_no, attempt,
+t_send, t_done, status, input_tokens, max_output_tokens, output_tokens, ttft_ms, latency_ms,
 retry_after, cwnd, in_flight
 ```
+
+- `agent_class`: `light` 또는 `heavy` (E4용, 11/17 추가). E1·E3은 모두 `light`.
+- `max_output_tokens`: 요청에 넣은 출력 상한. C3의 출력 예상 오차(`max_output_tokens` − `output_tokens`)를 볼 때 쓴다 (11/17 추가).
+- `output_tokens`: 200일 때만 값이 있고, 나머지는 빈 칸.
+- `cwnd`: C3는 토큰 단위 윈도다. 다른 컨트롤러와 단위가 다르므로 그래프에서 따로 그린다.
 
 - `run_id`에는 서버의 `X-Run-Id`를 쓴다 (서버 로그와 연결용).
 - 시각(`t_send`, `t_done`)은 실험 시작부터 지난 초.
@@ -89,3 +97,5 @@ retry_after, cwnd, in_flight
 ## 4. 서버 로그 CSV
 
 서버가 0.1초마다 대기열 길이, 처리 중 슬롯 수, 요청·입력·출력 버킷 잔량을 기록하고, `agent_id`별 완료 건수와 429 횟수를 남긴다. 형식은 서버 코드의 문서를 따른다.
+
+**추가 요청 (11/17, E4용)**: `agent_id`별로 **실제로 쓴 입력 토큰 합, 출력 토큰 합**도 남긴다. 토큰 기준 Jain 지수를 서버 쪽 숫자로도 계산해 요청 로그와 대조하기 위해서다. 열 이름과 위치는 P1이 정하고 이 절에 적는다.
