@@ -126,6 +126,8 @@ class Agent:
                 t.add_done_callback(self._finished)
             else:
                 await asyncio.sleep(self.cfg.poll_seconds)  # C5의 can_send는 시간만 지나도 참이 되므로 폴링
+        if self.errors:                                     # 마지막 작업에서 난 예외는 루프가 끝난 뒤에야 보인다
+            raise self.errors[0]
 
     def _finished(self, t: asyncio.Task) -> None:
         self.running.discard(t)

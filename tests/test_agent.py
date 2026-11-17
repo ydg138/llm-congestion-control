@@ -4,6 +4,7 @@ import asyncio
 import csv
 import time
 
+import pytest
 from aiohttp import web
 
 from client.controllers import AIMDConfig, AIMDWindow, FixedConfig, FixedWindow
@@ -82,6 +83,39 @@ def test_retry_goes_before_new_task(tmp_path):
     assert [r["cwnd"] for r in rows] == ["1.0", "2.0", "2.5"]
     assert rows[1]["ttft_ms"] == "2.0"
     assert progress.active == 0 and progress.last_success > progress.started
+
+
+class FailOnTaskLog:
+    """정해 둔 작업의 로그를 쓸 때 예외를 내는 가짜 로그 (디스크 오류 흉내)."""
+
+    def __init__(self, task_id):
+        self.task_id = task_id
+
+    def write(self, row):
+        if row["task_id"] == self.task_id:
+            raise OSError("로그 쓰기 실패")
+
+
+def test_error_in_last_task_is_raised():
+    async def handler(request):
+        return web.json_response({"output_tokens": 1, "ttft_seconds": 0.001})
+
+    tasks = [Task("t0", 10, 8), Task("t1", 10, 8)]
+    progress = Progress(time.perf_counter())
+
+    async def main():
+        runner, url = await start_fake_server(handler)
+        try:
+            # C2 init_cwnd=1이라 하나씩 보낸다 → 마지막 작업 t1에서 예외가 나면 줄이 모두 빈 상태
+            agent = Agent(AgentSpec("a1", "light", "C2"), tasks, AIMDWindow(AIMDConfig(init_cwnd=1)),
+                          url, FailOnTaskLog("t1"), progress)
+            await asyncio.wait_for(agent.run(), 5)
+        finally:
+            await runner.cleanup()
+
+    with pytest.raises(OSError, match="로그 쓰기 실패"):
+        asyncio.run(main())
+    assert progress.active == 0
 
 
 class CallLog:
