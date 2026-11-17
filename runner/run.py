@@ -1,36 +1,37 @@
-"""명령줄 실행기: 서버를 새로 띄우고, 에이전트를 돌리고, 요청 로그 CSV와 /stats JSON을 남긴다.
+"""명령줄 실행기: 실험 조건(runner/experiments.py)을 시드별로 반복해 돌린다.
 
 예:
-    python -m runner.run --exp E1 --controller C2 --seed 1 --tasks 100 ^
-        --server-dir ..\\CN_Server --server-config ..\\CN_Server\\examples\\config.json
+    python -m runner.run --exp minimum --server-dir ..\\CN_Server              # E1·E3 × 시드 1~5 (35회)
+    python -m runner.run --exp E1 --controller C2 --seed 1 --server-dir ..\\CN_Server
 
-결과 (results/ 아래):
+명령 한 번의 결과는 results/<exp>_<YYYYmmdd-HHMMSS>/ 폴더 하나에 모인다:
     <exp>_<controller>_seed<seed>_<run_id>.csv          요청 로그 (docs/interface.md 3절)
     <exp>_<controller>_seed<seed>_<run_id>_stats.json   맨 위 runner(실행 결과 상태) + 서버 /stats
     server/                                             서버 CSV와 서버 콘솔 출력
-runner.status가 aborted이거나 /stats를 못 받으면 이유를 stderr에 쓰고 종료 코드 1로 끝난다.
+    runs.csv                                            실행 목록: 실행마다 status와 대조 결과
+aborted이거나 대조가 맞지 않는 실행이 하나라도 있으면 종료 코드 1로 끝난다.
 """
 
 import argparse
 import asyncio
+import csv
 import json
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from client.factory import make_controller
-from runner.agent import Agent, AgentSpec, Progress
+from runner.agent import Agent, Progress
+from runner.check_run import compare, read_run
+from runner.experiments import EXPERIMENTS, SEEDS, Condition, select
 from runner.request_log import RequestLog, log_path
 from runner.server_proc import free_port, get_json, start_server, stop_server, wait_ready
 from runner.watchdog import Limits, RunAborted, watch
 from runner.workload import make_tasks
 
 RESULTS = Path(__file__).resolve().parents[1] / "results"
-
-
-def default_agents(controller: str) -> list[AgentSpec]:
-    """지금은 light 에이전트 하나. E3·E4는 이 목록만 바꾼다 (다음 단계에서 experiments.py로)."""
-    return [AgentSpec("a1", "light", controller, 0.0)]
+RUN_COLUMNS = ["exp", "controller", "seed", "run_id", "status", "reason", "check", "csv"]
 
 
 async def run_agents(agents, n_tasks: int, seed: int, base_url: str, log, limits: Limits,
@@ -56,7 +57,7 @@ def run_experiment(agents, n_tasks: int, seed: int, base_url: str, log, limits: 
 
     completed: 모든 작업이 200으로 끝남
     aborted: 안전장치로 멈췄거나, 422·타임아웃·연결 오류로 포기한 작업이 있음
-    코드 오류·Ctrl+C는 그대로 올린다 (main이 aborted로 기록한다).
+    코드 오류·Ctrl+C는 그대로 올린다 (run_once가 aborted로 기록한다).
     """
     progress = Progress(time.perf_counter())                # 실험 시작 시각
     try:
@@ -83,21 +84,78 @@ def save_stats(base_url: str, path: Path, outcome: dict) -> dict | None:
     return stats
 
 
+def run_once(cond: Condition, seed: int, out_dir: Path, server_dir: Path, limits: Limits) -> dict:
+    """조건 하나를 시드 하나로 돌린다: 서버 시작 → 실행 → stats 저장 → 서버 끄기.
+
+    실행 목록에 들어갈 run_id·status·reason·csv를 돌려준다.
+    """
+    port = free_port()
+    base_url = f"http://127.0.0.1:{port}"
+    launch_log = out_dir / "server" / f"launch_{cond.exp}_{cond.label}_seed{seed}.log"
+    proc = start_server(server_dir, cond.server_config, out_dir / "server", port, launch_log)
+    try:
+        run_id = wait_ready(base_url, proc, launch_log)    # 새 서버 = 새 run_id, 버킷·통계 초기화
+        csv_path = log_path(out_dir, cond.exp, cond.label, seed, run_id)
+        log = RequestLog(csv_path, run_id, cond.exp, seed)
+        try:
+            outcome = run_experiment(cond.agents, cond.tasks, seed, base_url, log, limits)
+        except BaseException as e:                          # 코드 오류·Ctrl+C도 aborted로 남기고 그대로 올린다
+            outcome = {"status": "aborted", "reason": f"예외: {type(e).__name__}: {e}"}
+            raise
+        finally:                                            # 어떻게 끝나든 로그를 닫고 /stats를 남긴다
+            log.close()
+            save_stats(base_url, csv_path.with_name(csv_path.stem + "_stats.json"), outcome)
+    finally:
+        stop_server(proc, port)                             # 어떻게 끝나든 서버는 반드시 끈다
+    return {"run_id": run_id, **outcome, "csv": csv_path.name}
+
+
+def check(csv_path: Path) -> str:
+    """요청 로그와 stats JSON을 대조한다 (runner/check_run.py). 맞으면 "OK", 아니면 틀린 항목."""
+    failed = [name for name, got, want in compare(*read_run(csv_path)) if got != want]
+    return "OK" if not failed else "FAIL: " + ", ".join(failed)
+
+
+def run_all(plan, out_dir: Path, args, limits: Limits) -> list[dict]:
+    """(조건, 시드) 목록을 차례로 돌리고 runs.csv에 한 줄씩 남긴다. 문제 있는 실행 목록을 돌려준다."""
+    bad = []
+    with open(out_dir / "runs.csv", "w", encoding="utf-8", newline="") as f:
+        runs = csv.DictWriter(f, fieldnames=RUN_COLUMNS)
+        runs.writeheader()
+        for i, (cond, seed) in enumerate(plan, 1):
+            if args.tasks is not None:
+                cond = replace(cond, tasks=args.tasks)      # 빠른 확인용
+            if args.server_config is not None:
+                cond = replace(cond, server_config=args.server_config)
+            row = {"exp": cond.exp, "controller": cond.label, "seed": seed}
+            started = time.perf_counter()
+            try:
+                row.update(run_once(cond, seed, out_dir, args.server_dir.resolve(), limits))
+                row["check"] = check(out_dir / row["csv"])
+            except Exception as e:                          # 서버 시작 실패 등도 aborted로 적고 다음 실행으로
+                row.update(status="aborted", reason=f"예외: {type(e).__name__}: {e}", check="-")
+            runs.writerow(row)
+            f.flush()                                       # 중간에 멈춰도 그때까지의 목록이 남게
+            print(f"[{i}/{len(plan)}] {cond.exp} {cond.label} seed{seed}: {row['status']}, "
+                  f"대조 {row['check']}, {time.perf_counter() - started:.1f}초", flush=True)
+            if row["status"] != "completed" or row["check"] != "OK":
+                bad.append(row)
+    return bad
+
+
 def parse_args(argv=None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="실험 한 번: 서버를 새로 띄우고 요청 로그와 /stats를 남긴다")
-    p.add_argument("--exp", required=True, help="실험 이름 (파일 이름에 들어감, 예: E1)")
-    p.add_argument("--controller", required=True, help="컨트롤러 이름 (예: C2, C0-8)")
-    p.add_argument("--seed", type=int, default=1, help="작업량 시드")
-    p.add_argument("--tasks", type=int, default=100, help="에이전트당 작업 수")
+    p = argparse.ArgumentParser(description="실험 조건(runner/experiments.py)을 시드별로 반복해 돌린다")
+    p.add_argument("--exp", required=True, choices=sorted(EXPERIMENTS), help="minimum은 E1 + E3")
+    p.add_argument("--controller", help="이 컨트롤러 조건만 (예: C2, C0-8)")
+    p.add_argument("--seed", type=int, help=f"이 시드만 (생략하면 {SEEDS})")
+    p.add_argument("--tasks", type=int, help="에이전트당 작업 수 덮어쓰기 (빠른 확인용)")
     p.add_argument("--server-dir", type=Path, required=True, help="서버 폴더 (.venv 포함)")
-    p.add_argument("--server-config", type=Path, help="서버 설정 JSON (생략하면 서버 기본값)")
-    p.add_argument("--max-seconds", type=float, default=600.0, help="전체 시간 상한 (초)")
+    p.add_argument("--server-config", type=Path, help="서버 설정 덮어쓰기 (생략하면 조건의 설정)")
+    p.add_argument("--max-seconds", type=float, default=600.0, help="실행 하나의 전체 시간 상한 (초)")
     p.add_argument("--stall-seconds", type=float, default=30.0, help="이 시간 동안 완료가 없으면 멈춤 (초)")
     args = p.parse_args(argv)
-    try:
-        make_controller(args.controller)                    # 이름이 틀리면 서버를 띄우기 전에 알린다
-    except ValueError as e:
-        p.error(str(e))
+    if not select(args.exp, args.controller, args.seed):
+        p.error(f"{args.exp}에 컨트롤러 {args.controller} 조건이 없음")
     if args.server_config is not None and not args.server_config.is_file():
         p.error(f"서버 설정 파일이 없음: {args.server_config}")
     return args
@@ -105,38 +163,18 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 def main(argv=None) -> int:
     args = parse_args(argv)
-    agents = default_agents(args.controller)
+    plan = select(args.exp, args.controller, args.seed)
     limits = Limits(max_seconds=args.max_seconds, stall_seconds=args.stall_seconds)
-    port = free_port()
-    base_url = f"http://127.0.0.1:{port}"
-    launch_log = RESULTS / "server" / f"launch_{args.exp}_{args.controller}_seed{args.seed}.log"
-    proc = start_server(args.server_dir.resolve(), args.server_config, RESULTS / "server", port, launch_log)
-    problems = []
-    try:
-        run_id = wait_ready(base_url, proc, launch_log)    # 새 서버 = 새 run_id, 버킷·통계 초기화
-        csv_path = log_path(RESULTS, args.exp, args.controller, args.seed, run_id)
-        stats_path = csv_path.with_name(csv_path.stem + "_stats.json")
-        log = RequestLog(csv_path, run_id, args.exp, args.seed)
-        try:
-            outcome = run_experiment(agents, args.tasks, args.seed, base_url, log, limits)
-        except BaseException as e:                          # 코드 오류·Ctrl+C도 aborted로 남기고 그대로 올린다
-            outcome = {"status": "aborted", "reason": f"예외: {type(e).__name__}: {e}"}
-            raise
-        finally:                                            # 어떻게 끝나든 로그를 닫고 /stats를 남긴다
-            log.close()
-            stats = save_stats(base_url, stats_path, outcome)
-    finally:
-        stop_server(proc, port)                             # 어떻게 끝나든 서버는 반드시 끈다
-    print(f"요청 로그: {csv_path}")
-    print(f"서버 통계: {stats_path}")
-    if outcome["status"] == "aborted":
-        problems.append(outcome["reason"])
-    if stats is None:
-        problems.append("/stats 저장 실패 (서버가 답하지 않음)")
-    elif problems:
-        problems.append(f"서버 기준 완료 {stats['completed']}/{len(agents) * args.tasks}")
-    if problems:
-        print("; ".join(problems), file=sys.stderr)
+    out_dir = RESULTS / f"{args.exp}_{time.strftime('%Y%m%d-%H%M%S')}"
+    out_dir.mkdir(parents=True)                             # 이미 있으면 오류 (같은 초에 두 번 실행)
+    (out_dir / "server").mkdir()
+    bad = run_all(plan, out_dir, args, limits)
+    print(f"결과 폴더: {out_dir}")
+    if bad:
+        print(f"문제 있는 실행 {len(bad)}개:", file=sys.stderr)
+        for r in bad:
+            print(f"  {r['exp']} {r['controller']} seed{r['seed']}: {r['status']} "
+                  f"{r.get('reason') or ''} / 대조 {r['check']}", file=sys.stderr)
         return 1
     return 0
 

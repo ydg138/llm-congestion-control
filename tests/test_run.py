@@ -4,6 +4,7 @@ run_experiment는 자기 이벤트 루프(asyncio.run)를 만들므로, 가짜 �
 http.server를 스레드로 띄운다.
 """
 
+import csv
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -78,6 +79,22 @@ def test_safety_stop_is_aborted(server, tmp_path):
 def test_failed_tasks_make_run_aborted(server, tmp_path):
     server.status = 422                                     # 기다려도 안 되는 요청 → 재시도 없이 실패
     assert run(server, tmp_path) == {"status": "aborted", "reason": "작업 0/3만 성공"}
+
+
+def test_two_agents_late_join_both_complete(server, tmp_path):
+    agents = [AgentSpec("a1", "light", "C2", 0.0), AgentSpec("a2", "light", "C2", 0.3)]   # a2는 0.3초 뒤
+    log = RequestLog(tmp_path / "log.csv", "fake", "T", 1)
+    try:
+        outcome = run_experiment(agents, 3, 1, url(server), log, Limits())
+    finally:
+        log.close()
+    assert outcome == {"status": "completed", "reason": None}
+    with open(tmp_path / "log.csv", encoding="utf-8", newline="") as f:
+        rows = list(csv.DictReader(f))
+    ok = sorted(r["task_id"] for r in rows if r["status"] == "200")
+    assert ok == [f"s1-{a}-00{i}" for a in ("a1", "a2") for i in range(3)]   # 2 에이전트 × 3 작업
+    first = {a: min(float(r["t_send"]) for r in rows if r["agent_id"] == a) for a in ("a1", "a2")}
+    assert first["a1"] < 0.3 <= first["a2"]
 
 
 def test_stats_json_has_runner_first(server, tmp_path):
