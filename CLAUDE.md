@@ -61,7 +61,7 @@ docs/       설계 문서
 
 - 테스트: `pytest -q`
 - 가짜 서버 실행: `python -m server.mock_llm` (예정)
-- 실험 실행: `python -m runner.run --exp E1 --controller C2` (예정)
+- 실험 실행: `python -m runner.run --exp E1 --controller C2 --seed 1 --tasks 100 --server-dir <서버 폴더> --server-config <서버 설정 JSON>` (서버 폴더는 서버 브랜치를 받고 `.venv`를 만든 곳)
 - 그래프: `python -m analysis.plot results/<파일>.csv` (예정)
 
 ## 실제 API와 비용
