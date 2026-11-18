@@ -81,6 +81,14 @@ Remaining은 소수 잔량의 내림값. **200은 완료·정산 후**, 거절�
 
 `/stats`의 `agent_stats`는 에이전트 ID를 키로 사용합니다. 예를 들어 `{"agent-a":{"completed":1,"rate_limited":2}}`는 완료 1건과 HTTP 429 응답 2건입니다. 한 작업의 재시도도 각각 집계합니다. 422, 529, 처리 중 취소는 두 수에 포함하지 않습니다.
 
+### 서버 경과 시간
+
+`GET /stats`의 최상위 `elapsed_seconds`는 현재 `run_id`의 서버 시작 후 경과한 초입니다. `time.perf_counter() - state.started_at`을 소수점 6자리로 반올림하며, 아래 두 서버 CSV의 `elapsed_seconds`와 같은 시작 시각과 단조 시계를 사용합니다. 서로 다른 시점의 조회·표본은 그만큼 다른 값을 가집니다. 서버를 재시작하면 새 `run_id`와 함께 경과 시간도 처음부터 계산합니다. 첫 조회까지 시간이 지나므로 첫 값은 0보다 클 수 있습니다.
+
+P3 실행기는 실험 시작 직전에 `/stats`를 조회하고 `run_id`가 이번 서버와 일치하는지 확인합니다. 이때 읽은 `elapsed_seconds`를 종료 시 `/stats`와 구분해 결과 JSON에 저장합니다. 저장 위치는 예를 들어 `runner.server_elapsed_at_start_seconds`로 정할 수 있습니다. 요청 로그의 `t_send`·`t_done`에 이 시작값을 더하면 서버 CSV 시간축에서의 근삿값을 얻습니다. 조회 왕복 시간과 실험 시작까지의 간격 때문에 오차가 생길 수 있으므로, 조회 직후 실험을 시작합니다.
+
+시작값이 3.25초이고 `t_send`가 0.40초인 요청은 서버 CSV의 약 3.65초 구간과 비교합니다. 종료 통계의 최상위 `elapsed_seconds`는 종료 시점의 경과 시간으로 저장합니다. `/generate`의 `server_elapsed_seconds`는 요청 한 건의 대기·처리 시간을 나타냅니다.
+
 ### 실험 CSV
 
 일반 실행은 현재 작업 폴더의 `results/server/`에 아래 두 파일을 생성합니다. CLI에서는 `--log-dir`, Python에서 앱을 직접 생성할 때는 `create_app(log_dir=...)`로 경로를 지정합니다.

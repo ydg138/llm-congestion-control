@@ -111,6 +111,7 @@ async def stats(request):
     async with state.lock:
         return web.json_response({
             "run_id": state.run_id, "config_revision": state.revision,
+            "elapsed_seconds": round(time.perf_counter() - state.started_at, 6),
             "capacity": state.config.capacity, "refill_rate_per_second": state.config.refill_rate,
             "accepted": state.accepted, "rate_limited": state.rejected,
             "completed": state.completed, "overloaded": state.overloaded,

@@ -16,6 +16,27 @@ def read_rows(path):
 
 
 class ExperimentLogTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stats_elapsed_seconds_matches_csv_and_resets_on_restart(self):
+        with tempfile.TemporaryDirectory() as directory, patch("time.perf_counter", return_value=100.0) as clock:
+            async with TestClient(TestServer(create_app(log_dir=directory))) as http:
+                clock.return_value = 100.25
+                first = await (await http.get("/stats")).json()
+                clock.return_value = 106.5
+                second = await (await http.get("/stats")).json()
+                self.assertEqual(first["elapsed_seconds"], 0.25)
+                self.assertEqual(second["elapsed_seconds"], 6.5)
+                self.assertEqual(first["run_id"], second["run_id"])
+
+            samples = read_rows(Path(directory) / f"server_state_{first['run_id']}.csv")
+            self.assertEqual(float(samples[-1]["elapsed_seconds"]), second["elapsed_seconds"])
+
+            clock.return_value = 110.0
+            async with TestClient(TestServer(create_app(log_dir=directory))) as http:
+                clock.return_value = 110.125
+                restarted = await (await http.get("/stats")).json()
+                self.assertNotEqual(restarted["run_id"], first["run_id"])
+                self.assertEqual(restarted["elapsed_seconds"], 0.125)
+
     async def test_live_queue_and_final_agent_counts_survive_restart(self):
         def client(directory):
             return TestClient(TestServer(create_app(
