@@ -251,4 +251,7 @@ def test_on_send_accepts_token_args_for_all_controllers():
         c = make_controller(name)
         assert c.can_send(164, input_tokens=100)
         assert c.on_send(164, input_tokens=100) == 1     # 요청 번호는 그대로 1부터
-        assert c.in_flight == 1                           # 요청 수 윈도는 토큰과 무관하게 1 증가
+        if name.startswith("C3"):
+            assert c.in_flight == 164                     # C3는 토큰 윈도: 예약한 토큰만큼
+        else:
+            assert c.in_flight == 1                       # 요청 수 윈도는 토큰과 무관하게 1 증가
