@@ -67,7 +67,8 @@ class BaseController:
     def can_send(self, est_tokens: int = 0) -> bool:
         return self.in_flight < int(self.cwnd)
 
-    def on_send(self, est_tokens: int = 0) -> int:
+    def on_send(self, est_tokens: int = 0, input_tokens: int = 0) -> int:
+        """est_tokens·input_tokens는 C3(토큰 윈도)만 쓴다. 나머지는 받기만 하고 무시한다."""
         self.in_flight += 1
         self.sent += 1
         return self.sent        # 요청 번호를 돌려줘 응답과 짝짓는다
