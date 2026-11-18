@@ -73,9 +73,9 @@ C2는 한 바퀴에 **요청 1개**씩 늘린다. 요청당 1,000토큰인 에�
 
 | 에이전트 | 요청 | 요청당 토큰 | 지연 | 결과 |
 | --- | --- | --- | --- | --- |
-| 가벼움 | 입력 100, `max_output_tokens` 64 | 약 164 | 약 1.3초 | 기준 |
-| **입력이 무거움** | 입력 10,000, `max_output_tokens` 64 | 약 10,064 (약 61배) | 약 2.3초 (약 1.8배) | 토큰 차이가 지연 차이보다 훨씬 크다. C2는 무거운 쪽에 토큰을 몰아주고, C3가 이를 고치는지 본다. **연구 질문의 깨끗한 경우** |
-| **출력이 무거움** | 입력 100, `max_output_tokens` 1,000 | 약 608 (약 3.7배, 출력 평균 약 508) | 약 10.2초 (약 7.8배) | 지연 차이가 토큰 차이보다 크다. TCP의 RTT 불공정처럼 지연이 긴 쪽은 한 바퀴가 길어 윈도가 천천히 큰다. C2에서도 무거운 쪽이 **오히려 손해**일 수 있다 |
+| 가벼움 (`light`) | 입력 100, `max_output_tokens` 64 | 약 164 | 약 1.3초 | 기준 |
+| **입력이 무거움** (`heavy_in`) | 입력 10,000, `max_output_tokens` 64 | 약 10,064 (약 61배) | 약 2.3초 (약 1.8배) | 토큰 차이가 지연 차이보다 훨씬 크다. C2는 무거운 쪽에 토큰을 몰아주고, C3가 이를 고치는지 본다. **연구 질문의 깨끗한 경우** |
+| **출력이 무거움** (`heavy_out`) | 입력 100, `max_output_tokens` 1,000 | 약 608 (약 3.7배, 출력 평균 약 508) | 약 10.2초 (약 7.8배) | 지연 차이가 토큰 차이보다 크다. TCP의 RTT 불공정처럼 지연이 긴 쪽은 한 바퀴가 길어 윈도가 천천히 큰다. C2에서도 무거운 쪽이 **오히려 손해**일 수 있다 |
 
 그래서:
 
@@ -96,8 +96,8 @@ C2는 한 바퀴에 **요청 1개**씩 늘린다. 요청당 1,000토큰인 에�
 
 ## 7. 인터페이스 (바뀌는 것)
 
-- 실행기는 `can_send(est_tokens)`, `on_send(est_tokens)`에 `input_tokens + max_output_tokens`를 넘긴다 (`docs/interface.md` 2절, 이미 반영). C3-ewma는 그중 `max_output_tokens` 부분을 자기 예상으로 바꿔 쓴다. 그러려면 C3가 입력 토큰을 따로 알아야 하므로, **`on_send(est_tokens, input_tokens=0)` 인자를 하나 더 받는 것**을 제안한다. 다른 컨트롤러는 무시한다.
-- C3-oracle은 실제 출력 길이가 필요하다. 실행기가 작업량에서 아는 값을 `on_send(..., true_output=n)`으로 넘긴다 (oracle 실험에서만).
+- 실행기는 `can_send(est_tokens)`, `on_send(est_tokens)`에 `input_tokens + max_output_tokens`를 넘긴다 (`docs/interface.md` 2절, 이미 반영). C3-ewma는 그중 `max_output_tokens` 부분을 자기 예상으로 바꿔 쓴다. 그러려면 C3가 입력 토큰을 따로 알아야 하므로 **`on_send(est_tokens, input_tokens=0)`** 인자를 추가했다 (11/18, 모든 컨트롤러가 받고 C3 말고는 무시).
+- C3-oracle은 실제 출력 길이가 필요하다. 출력 길이는 서버가 정하지만, 서버의 계산(`server/model.py`)은 (서버 seed, `output_min`, `output_max`, `workload_id`, `max_output_tokens`)만 쓰는 순수 함수다. 그래서 실행기가 같은 서버 설정 파일로 미리 계산해 **`est_tokens = input + 실제 출력`**으로 넘긴다 (P3 제안, 11/18). 인자를 따로 늘리지 않는다. 서버 코드가 main에 들어온 뒤, 실행 중 설정을 바꾸지 않는 실험에서만 쓴다.
 - `on_success`는 `resp["input_tokens"] + resp["output_tokens"]`로 `cost`를 계산한다.
 - `state()`에 `cwnd`(토큰), `in_flight`(토큰), `ssthresh`, `est_output`(C3-ewma 예상값)을 남긴다. 로그의 `cwnd` 열은 C3만 토큰 단위다.
 
@@ -114,13 +114,13 @@ C2는 한 바퀴에 **요청 1개**씩 늘린다. 요청당 1,000토큰인 에�
 
 | 역할 | 필요한 것 |
 | --- | --- |
-| P1 서버 | E4 설정: `output_max`를 무거운 출력용으로 크게(예: 1,000), 출력 버킷 `capacity`가 가장 큰 `max_output_tokens`보다 커야 함(아니면 422). 지금의 "예약 후 정산" 방식은 그대로 두면 됨 |
-| P3 실험 | 에이전트 종류 세 가지(가벼움, 입력 무거움, 출력 무거움), `on_send`에 `input_tokens`(·oracle이면 실제 출력) 넘기기 |
+| P1 서버 | E4 설정: `output_max`를 무거운 출력용으로 크게(예: 1,000), 출력 버킷 `capacity`가 가장 큰 `max_output_tokens`보다 커야 함(아니면 422). **입력 버킷 `input_capacity`도 `heavy_in` 요청(10,000)의 여러 배로** 잡아야 함. 지금 예시 값 10,000이면 가득 차 있을 때 하나만 들어가고, 넘으면 422 (P3 지적, 11/18). 지금의 "예약 후 정산" 방식은 그대로 두면 됨 |
+| P3 실험 | 에이전트 종류 세 가지(`light`, `heavy_in`, `heavy_out`), `on_send`에 `input_tokens` 넘기기, oracle 실험이면 서버 계산으로 구한 실제 출력을 `est_tokens`에 |
 | P4 분석 | 토큰 Jain 지수를 **누적 토큰**과 **초당 토큰** 두 가지로. 5절 문제를 보려면 속도 기준이 필요 |
 
 ## 10. 회의에서 정할 것
 
 1. 예약량 기본값: C3-max로 시작하는 데 동의하는지
 2. E4에 입력이 무거운 경우와 출력이 무거운 경우를 둘 다 넣을지 (5절)
-3. `on_send`에 `input_tokens`·`true_output` 인자 추가 (인터페이스 변경)
+3. ~~`on_send`에 `input_tokens`·`true_output` 인자 추가~~ → 11/18 정리: `input_tokens`만 추가(완료), oracle은 `est_tokens`에 실제 값을 넣는 방식
 4. `mss`, `init_cwnd` 초안 값
