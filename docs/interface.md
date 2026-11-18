@@ -51,7 +51,7 @@ POST /admin/config                       실행 중 한도·용량 변경 (MOCK_
 
 ```python
 class Controller:
-    def can_send(self, est_tokens: int = 0) -> bool: ...
+    def can_send(self, est_tokens: int = 0, input_tokens: int = 0) -> bool: ...
     def on_send(self, est_tokens: int = 0, input_tokens: int = 0) -> int: ...  # 요청 번호를 돌려줌
     def on_success(self, req_no: int, resp: dict) -> None: ...         # 200
     def on_rate_limited(self, req_no: int, retry_after: float | None) -> None: ...  # 429
@@ -67,11 +67,11 @@ class Controller:
 | `retry_after` | 429 본문의 `retry_after_seconds` (없으면 `None`) |
 | `on_error` | 혼잡 신호가 아니므로 윈도는 그대로, `in_flight`만 줄인다 |
 | `attempt` | 이번이 몇 번째 재시도인지. 첫 재시도가 1 (C1 백오프용, 나머지는 0초) |
-| `state()` | 항상 `cwnd`, `in_flight`, `ssthresh`. C4는 `min_ttft`, `ttft_ewma`, C5는 `limit`, `pause_until`을 더한다 |
+| `state()` | 항상 `cwnd`, `in_flight`, `ssthresh`. C3는 `est_output`, `in_flight_reqs`(요청 수)를 더하고 `cwnd`·`in_flight`·`ssthresh`가 토큰 단위다. C4는 `min_ttft`, `ttft_ewma`, C5는 `limit`, `pause_until`을 더한다 |
 | `est_tokens` | C3만 쓴다. 실행기는 `can_send`·`on_send`에 이번 요청의 `input_tokens + max_output_tokens`를 넘긴다. 다른 컨트롤러는 무시한다 |
 | `input_tokens` | `on_send`에만. 이번 요청의 입력 토큰 (11/18 추가). C3-ewma가 예약량을 `input + 예상 출력`으로 바꿀 때 쓴다. 실행기는 모든 컨트롤러에 똑같이 넘기고, C3 말고는 무시한다 |
 
-컨트롤러 이름: `C0-1`, `C0-8`, `C0-32`, `C0-64`, `C1`, `C2`, `C4`, `C5` (C3는 13주차). 설명은 `docs/controllers.md`.
+컨트롤러 이름: `C0-1`, `C0-8`, `C0-32`, `C0-64`, `C1`, `C2`, `C3`, `C3-ewma`, `C3-oracle`, `C4`, `C5`. `can_send`·`on_send`의 `input_tokens`는 11/18 추가 (C3-ewma용). 설명은 `docs/controllers.md`.
 
 C3가 들어오면 `on_success`의 `resp`에서 실제 `output_tokens`를 읽어 예약을 정산한다. 실행기 쪽 변경은 위 `est_tokens`·`input_tokens`를 넘기는 것뿐이다. C3-oracle(실제 출력 길이를 미리 앎)은 실행기가 서버 설정과 같은 출력 길이 계산으로 미리 구한 값을 `est_tokens`에 넣어 넘긴다 (서버 설정을 실행 중 바꾸지 않는 실험만). 세부는 `docs/c3_design.md`.
 
