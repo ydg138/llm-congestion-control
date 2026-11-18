@@ -93,6 +93,11 @@ retry_after, cwnd, in_flight
 - 시각(`t_send`, `t_done`)은 실험 시작부터 지난 초.
 - `cwnd`, `in_flight`는 응답을 처리한 직후의 값.
 - 파일 이름: `results/<exp>_<controller>_seed<seed>_<run_id>.csv`
+- `status`: HTTP 상태 코드. 응답을 받지 못하면 `timeout`(요청 시간 초과) 또는 `conn_error`(연결 실패, 응답을 읽지 못함). 이 둘과 422는 재시도하지 않고 그 작업은 실패로 남는다 (11/17 추가).
+- stats JSON: `results/<exp>_<controller>_seed<seed>_<run_id>_stats.json`. 실행이 끝난 뒤 서버 `/stats` 원본 맨 위에 `runner`를 붙인 것 (11/17 추가).
+  - `runner.status`: `completed`(모든 작업이 200으로 끝남) 또는 `aborted`(안전장치로 멈춤, 422·`timeout`·`conn_error`로 포기한 작업이 있음, 코드 오류·Ctrl+C)
+  - `runner.reason`: `aborted`인 이유. `completed`면 `null`
+- **`runner.status`가 `aborted`인 실행은 분석에서 뺀다** (11/17 추가). 멈추는 순간 응답을 기다리던 요청은 요청 로그에 없어 서버 숫자와 맞지 않을 수 있다. 확인은 `python -m runner.check_run <요청 로그 CSV>`.
 
 ## 4. 서버 로그 CSV
 
