@@ -242,3 +242,13 @@ def test_factory_names():
     assert make_controller("C2", ssthresh=16).ssthresh == 16
     with pytest.raises(ValueError):
         make_controller("C9")
+
+
+def test_on_send_accepts_token_args_for_all_controllers():
+    """실행기는 모든 컨트롤러에 est_tokens·input_tokens를 똑같이 넘긴다. C0~C5 모두 받아야 한다."""
+    from client.factory import NAMES, make_controller
+    for name in NAMES:
+        c = make_controller(name)
+        assert c.can_send(164)
+        assert c.on_send(164, input_tokens=100) == 1     # 요청 번호는 그대로 1부터
+        assert c.in_flight == 1                           # 요청 수 윈도는 토큰과 무관하게 1 증가
