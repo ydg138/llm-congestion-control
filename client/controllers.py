@@ -1,10 +1,11 @@
-"""컨트롤러 C0~C2: 에이전트가 요청을 언제, 몇 개 보낼지 정한다.
+"""컨트롤러 C0~C5: 에이전트가 요청을 언제, 몇 개 보낼지 정한다.
 
 순수 로직만 둔다 (asyncio·HTTP 없음). 실행기(runner/agent.py)가 응답을 받을 때마다
 아래 메서드를 불러 준다.
 
-    can_send(est_tokens)            -> 지금 하나 더 보내도 되나
-    on_send(est_tokens)             -> 요청 번호(req_no)를 돌려줌
+    can_send(est_tokens, input_tokens)  -> 지금 하나 더 보내도 되나
+    on_send(est_tokens, input_tokens)   -> 요청 번호(req_no)를 돌려줌
+    (est_tokens = 입력 + 출력 상한, input_tokens = 입력. 토큰 인자는 C3만 쓴다)
     on_success(req_no, resp)        -> 200
     on_rate_limited(req_no, retry_after)  -> 429 (내 한도 초과)
     on_overloaded(req_no)           -> 529 (서버 전체 과부하)
@@ -64,7 +65,7 @@ class BaseController:
         self.in_flight = 0      # 응답을 기다리는 요청 수
         self.sent = 0           # 지금까지 발급한 마지막 요청 번호
 
-    def can_send(self, est_tokens: int = 0) -> bool:
+    def can_send(self, est_tokens: int = 0, input_tokens: int = 0) -> bool:
         return self.in_flight < int(self.cwnd)
 
     def on_send(self, est_tokens: int = 0, input_tokens: int = 0) -> int:
@@ -248,12 +249,12 @@ class ExplicitAIMD(AIMDWindow):
         self.pause_until = 0.0  # 이 시각 전에는 보내지 않는다 (retry-after)
         self.limit = None       # 남은 한도로 정한 동시 요청 상한 (None이면 상한 없음)
 
-    def can_send(self, est_tokens: int = 0) -> bool:
+    def can_send(self, est_tokens: int = 0, input_tokens: int = 0) -> bool:
         if self.clock() < self.pause_until:         # 서버가 기다리라고 한 시간
             return False
         if self.limit is not None and self.in_flight > 0 and self.in_flight >= self.limit:
             return False                            # 남은 한도만큼 이미 보냄 (기다리는 요청이 없으면 1개는 허용)
-        return super().can_send(est_tokens)
+        return super().can_send(est_tokens, input_tokens)
 
     def on_success(self, req_no: int, resp: dict | None = None) -> None:
         super().on_success(req_no, resp)            # C2와 같이 cwnd를 늘림
