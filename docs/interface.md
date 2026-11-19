@@ -93,11 +93,16 @@ retry_after, cwnd, in_flight
 - `run_id`에는 서버의 `X-Run-Id`를 쓴다 (서버 로그와 연결용).
 - 시각(`t_send`, `t_done`)은 실험 시작부터 지난 초.
 - `cwnd`, `in_flight`는 응답을 처리한 직후의 값.
-- 파일 이름: `results/<exp>_<controller>_seed<seed>_<run_id>.csv`
+- **결과 위치 (11/19 변경)**: 명령 한 번(`python -m runner.run --exp ...`)의 결과는 `results/<명령의 exp>_<YYYYmmdd-HHMMSS>/` 폴더 하나에 모인다. 예: `results/minimum_20261119-150000/`. 빠른 확인이나 다시 돌린 결과가 본 실험과 섞이지 않고, 폴더째 묶어 공유할 수 있다.
+  - 요청 로그: `<결과 폴더>/<exp>_<controller>_seed<seed>_<run_id>.csv` (`<exp>`는 E1·E3 같은 실험 이름)
+  - stats JSON: `<결과 폴더>/<exp>_<controller>_seed<seed>_<run_id>_stats.json`
+  - 서버 CSV와 서버 콘솔 출력: `<결과 폴더>/server/`
+  - 실행 목록: `<결과 폴더>/runs.csv`. 열은 `exp, controller, seed, run_id, status, reason, check, csv`. 분석에는 `status`가 `completed`이고 `check`가 `OK`인 실행만 쓴다.
 - `status`: HTTP 상태 코드. 응답을 받지 못하면 `timeout`(요청 시간 초과) 또는 `conn_error`(연결 실패, 응답을 읽지 못함). 이 둘과 422는 재시도하지 않고 그 작업은 실패로 남는다 (11/17 추가).
-- stats JSON: `results/<exp>_<controller>_seed<seed>_<run_id>_stats.json`. 실행이 끝난 뒤 서버 `/stats` 원본 맨 위에 `runner`를 붙인 것 (11/17 추가).
+- stats JSON: 실행이 끝난 뒤 서버 `/stats` 원본 맨 위에 `runner`를 붙인 것 (11/17 추가).
   - `runner.status`: `completed`(모든 작업이 200으로 끝남) 또는 `aborted`(안전장치로 멈춤, 422·`timeout`·`conn_error`로 포기한 작업이 있음, 코드 오류·Ctrl+C)
   - `runner.reason`: `aborted`인 이유. `completed`면 `null`
+  - `runner.server_elapsed_at_start_seconds`: 실험 시작 직전에 읽은 서버 `/stats`의 `elapsed_seconds`. 서버에 값이 없으면 `null` (11/19 추가). 요청 로그의 `t_send`에 이 값을 더하면 서버 CSV `elapsed_seconds` 시간축의 근삿값이 된다.
 - **`runner.status`가 `aborted`인 실행은 분석에서 뺀다** (11/17 추가). 멈추는 순간 응답을 기다리던 요청은 요청 로그에 없어 서버 숫자와 맞지 않을 수 있다. 확인은 `python -m runner.check_run <요청 로그 CSV>`.
 
 ## 4. 서버 로그 CSV
