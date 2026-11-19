@@ -52,7 +52,7 @@ POST /admin/config                       실행 중 한도·용량 변경 (MOCK_
 ```python
 class Controller:
     def can_send(self, est_tokens: int = 0) -> bool: ...
-    def on_send(self, est_tokens: int = 0) -> int: ...                 # 요청 번호를 돌려줌
+    def on_send(self, est_tokens: int = 0, input_tokens: int = 0) -> int: ...  # 요청 번호를 돌려줌
     def on_success(self, req_no: int, resp: dict) -> None: ...         # 200
     def on_rate_limited(self, req_no: int, retry_after: float | None) -> None: ...  # 429
     def on_overloaded(self, req_no: int) -> None: ...                  # 529
@@ -69,10 +69,11 @@ class Controller:
 | `attempt` | 이번이 몇 번째 재시도인지. 첫 재시도가 1 (C1 백오프용, 나머지는 0초) |
 | `state()` | 항상 `cwnd`, `in_flight`, `ssthresh`. C4는 `min_ttft`, `ttft_ewma`, C5는 `limit`, `pause_until`을 더한다 |
 | `est_tokens` | C3만 쓴다. 실행기는 `can_send`·`on_send`에 이번 요청의 `input_tokens + max_output_tokens`를 넘긴다. 다른 컨트롤러는 무시한다 |
+| `input_tokens` | `on_send`에만. 이번 요청의 입력 토큰 (11/18 추가). C3-ewma가 예약량을 `input + 예상 출력`으로 바꿀 때 쓴다. 실행기는 모든 컨트롤러에 똑같이 넘기고, C3 말고는 무시한다 |
 
 컨트롤러 이름: `C0-1`, `C0-8`, `C0-32`, `C0-64`, `C1`, `C2`, `C4`, `C5` (C3는 13주차). 설명은 `docs/controllers.md`.
 
-C3가 들어오면 `on_success`의 `resp`에서 실제 `output_tokens`를 읽어 예약을 정산한다. 실행기 쪽 변경은 위 `est_tokens`를 넘기는 것뿐이다. 세부는 C3 설계 때 이 절에 추가한다.
+C3가 들어오면 `on_success`의 `resp`에서 실제 `output_tokens`를 읽어 예약을 정산한다. 실행기 쪽 변경은 위 `est_tokens`·`input_tokens`를 넘기는 것뿐이다. C3-oracle(실제 출력 길이를 미리 앎)은 실행기가 서버 설정과 같은 출력 길이 계산으로 미리 구한 값을 `est_tokens`에 넣어 넘긴다 (서버 설정을 실행 중 바꾸지 않는 실험만). 세부는 `docs/c3_design.md`.
 
 ## 3. 요청 로그 CSV
 
@@ -84,7 +85,7 @@ t_send, t_done, status, input_tokens, max_output_tokens, output_tokens, ttft_ms,
 retry_after, cwnd, in_flight
 ```
 
-- `agent_class`: `light` 또는 `heavy` (E4용, 11/17 추가). E1·E3은 모두 `light`.
+- `agent_class`: `light`, `heavy_in`(입력이 무거움), `heavy_out`(출력이 무거움) 중 하나 (E4용, 11/18 확정). E1·E3은 모두 `light`.
 - `max_output_tokens`: 요청에 넣은 출력 상한. C3의 출력 예상 오차(`max_output_tokens` − `output_tokens`)를 볼 때 쓴다 (11/17 추가).
 - `output_tokens`: 200일 때만 값이 있고, 나머지는 빈 칸.
 - `cwnd`: C3는 토큰 단위 윈도다. 다른 컨트롤러와 단위가 다르므로 그래프에서 따로 그린다.
