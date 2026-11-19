@@ -52,22 +52,38 @@ async def run_agents(agents, n_tasks: int, seed: int, base_url: str, log, limits
     work.result()                                           # 에이전트에서 난 예외
 
 
-def run_experiment(agents, n_tasks: int, seed: int, base_url: str, log, limits: Limits) -> dict:
-    """에이전트를 끝까지 돌리고 실행 결과 상태 {"status", "reason"}를 돌려준다.
+def server_elapsed(base_url: str, run_id: str) -> float | None:
+    """서버 /stats의 elapsed_seconds (서버 CSV 시간축의 지금). 서버에 그 값이 없으면 None.
 
-    completed: 모든 작업이 200으로 끝남
-    aborted: 안전장치로 멈췄거나, 422·타임아웃·연결 오류로 포기한 작업이 있음
+    요청 로그의 t_send에 실험 시작 때 읽은 이 값을 더하면 서버 CSV elapsed_seconds의 근삿값이 된다.
+    run_id가 다르면 다른 서버에 붙은 것이므로 오류를 낸다.
+    """
+    stats = get_json(base_url, "/stats")
+    if stats.get("run_id") != run_id:
+        raise RuntimeError(f"/stats의 run_id가 이번 서버와 다름: {stats.get('run_id')} != {run_id}")
+    return stats.get("elapsed_seconds")
+
+
+def run_experiment(agents, n_tasks: int, seed: int, base_url: str, run_id: str, log,
+                   limits: Limits) -> dict:
+    """에이전트를 끝까지 돌리고 실행 결과 상태를 돌려준다 (stats JSON의 runner).
+
+    status: completed(모든 작업이 200으로 끝남) 또는 aborted(안전장치로 멈춤, 422·타임아웃·연결 오류로
+            포기한 작업이 있음). reason: aborted인 이유.
+    server_elapsed_at_start_seconds: 실험 시작 직전에 읽은 서버 경과 시간 (서버 CSV 시간축 맞추기용)
     코드 오류·Ctrl+C는 그대로 올린다 (run_once가 aborted로 기록한다).
     """
-    progress = Progress(time.perf_counter())                # 실험 시작 시각
+    start = server_elapsed(base_url, run_id)                # 읽은 직후 바로 시작해야 오차가 작다
+    progress = Progress(time.perf_counter())                # 실험 시작 시각 (요청 로그 t_send의 기준)
+    outcome = {"status": "completed", "reason": None, "server_elapsed_at_start_seconds": start}
     try:
         asyncio.run(run_agents(agents, n_tasks, seed, base_url, log, limits, progress))
     except RunAborted as e:
-        return {"status": "aborted", "reason": f"안전장치: {e}"}
+        return {**outcome, "status": "aborted", "reason": f"안전장치: {e}"}
     total = len(agents) * n_tasks
     if progress.completed < total:
-        return {"status": "aborted", "reason": f"작업 {progress.completed}/{total}만 성공"}
-    return {"status": "completed", "reason": None}
+        return {**outcome, "status": "aborted", "reason": f"작업 {progress.completed}/{total}만 성공"}
+    return outcome
 
 
 def save_stats(base_url: str, path: Path, outcome: dict) -> dict | None:
@@ -98,16 +114,18 @@ def run_once(cond: Condition, seed: int, out_dir: Path, server_dir: Path, limits
         csv_path = log_path(out_dir, cond.exp, cond.label, seed, run_id)
         log = RequestLog(csv_path, run_id, cond.exp, seed)
         try:
-            outcome = run_experiment(cond.agents, cond.tasks, seed, base_url, log, limits)
+            outcome = run_experiment(cond.agents, cond.tasks, seed, base_url, run_id, log, limits)
         except BaseException as e:                          # 코드 오류·Ctrl+C도 aborted로 남기고 그대로 올린다
-            outcome = {"status": "aborted", "reason": f"예외: {type(e).__name__}: {e}"}
+            outcome = {"status": "aborted", "reason": f"예외: {type(e).__name__}: {e}",
+                       "server_elapsed_at_start_seconds": None}
             raise
         finally:                                            # 어떻게 끝나든 로그를 닫고 /stats를 남긴다
             log.close()
             save_stats(base_url, csv_path.with_name(csv_path.stem + "_stats.json"), outcome)
     finally:
         stop_server(proc, port)                             # 어떻게 끝나든 서버는 반드시 끈다
-    return {"run_id": run_id, **outcome, "csv": csv_path.name}
+    # 실행 목록(runs.csv)에 들어갈 값만 돌려준다. runner의 나머지 값은 stats JSON에 있다
+    return {"run_id": run_id, "status": outcome["status"], "reason": outcome["reason"], "csv": csv_path.name}
 
 
 def check(csv_path: Path) -> str:
