@@ -14,11 +14,16 @@ from runner.workload import Task
 
 
 class RecordingC2(AIMDWindow):
-    """C2 그대로, wait_before_retry에 들어온 attempt만 기록한다."""
+    """C2 그대로, on_send에 들어온 토큰 인자와 wait_before_retry의 attempt만 기록한다."""
 
     def __init__(self):
         super().__init__(AIMDConfig(init_cwnd=1))
+        self.sends = []
         self.retry_attempts = []
+
+    def on_send(self, est_tokens=0, input_tokens=0):
+        self.sends.append((est_tokens, input_tokens))
+        return super().on_send(est_tokens, input_tokens)
 
     def wait_before_retry(self, attempt):
         self.retry_attempts.append(attempt)
@@ -74,6 +79,8 @@ def test_retry_goes_before_new_task(tmp_path):
     assert [b["request_id"] for b in received] == ["s1-a1-000-a0", "s1-a1-000-a1", "s1-a1-001-a0"]
     assert received[1]["max_output_tokens"] == received[0]["max_output_tokens"] == 64
     assert controller.retry_attempts == [1]         # 첫 재시도는 attempt=1
+    # on_send: (est_tokens = 입력 + 출력 상한, input_tokens). 재시도도 같은 값
+    assert controller.sends == [(164, 100), (164, 100), (184, 120)]
 
     rows = read_rows(path)
     assert [r["status"] for r in rows] == ["429", "200", "200"]
