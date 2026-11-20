@@ -31,7 +31,7 @@ class QueueTests(AioHTTPTestCase):
         return TestClient(server, timeout=ClientTimeout(total=5))
 
     async def send(self, identifier):
-        return await self.client.post("/generate", json={"request_id": identifier, "agent_id": "a"})
+        return await self.client.post("/generate", json={"request_id": identifier, "agent_id": "a", "input_tokens": 7})
 
     async def wait_state(self, active, queued):
         async def wait():
@@ -69,6 +69,8 @@ class QueueTests(AioHTTPTestCase):
         self.assertEqual((await first).status, 200)
         await self.wait_state(0, 0)
         self.assertEqual(self.app[STATE].cancelled, 1)
+        self.assertEqual(self.app[STATE].agent_stats["a"]["input_tokens_consumed"], 14)
+        self.assertEqual(self.app[STATE].agent_stats["a"]["output_tokens_consumed"], self.app[STATE].output_consumed)
 
     async def test_cancel_active_request_promotes_waiter(self):
         first = asyncio.create_task(self.send("first"))

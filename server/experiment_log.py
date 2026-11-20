@@ -21,7 +21,8 @@ async def record_experiment(state, directory):
         agents = csv.writer(agents_file)
         samples.writerow(("run_id", "elapsed_seconds", "queued", "active", "requests_remaining",
                           "input_tokens_remaining", "output_tokens_remaining"))
-        agents.writerow(("run_id", "elapsed_seconds", "agent_id", "completed", "rate_limited"))
+        agents.writerow(("run_id", "elapsed_seconds", "agent_id", "completed", "rate_limited",
+                         "input_tokens_consumed", "output_tokens_consumed"))
         agents_file.flush()
         previous_counts = {}
 
@@ -41,7 +42,8 @@ async def record_experiment(state, directory):
                              quotas["output_tokens"]["remaining"])
                 agent_rows = []
                 for agent_id, counters in state.agent_stats.items():
-                    counts = (counters["completed"], counters["rate_limited"])
+                    counts = (counters["completed"], counters["rate_limited"],
+                              counters["input_tokens_consumed"], counters["output_tokens_consumed"])
                     if previous_counts.get(agent_id) != counts:
                         agent_rows.append((state.run_id, elapsed, agent_id, *counts))
                         previous_counts[agent_id] = counts
