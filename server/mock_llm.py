@@ -221,7 +221,10 @@ async def generate(request):
         body = {"request_id": payload["request_id"], "agent_id": payload["agent_id"],
                 "workload_id": workload_id, "run_id": state.run_id, "config_revision": state.revision}
         # E3에서 완료 건수가 0인 참여자도 관찰할 수 있도록 첫 요청 때 등록한다.
-        counts = state.agent_stats.setdefault(payload["agent_id"], {"completed": 0, "rate_limited": 0})
+        counts = state.agent_stats.setdefault(payload["agent_id"], {
+            "completed": 0, "rate_limited": 0,
+            "input_tokens_consumed": 0, "output_tokens_consumed": 0,
+        })
         try:
             plan = LLMModel(config.model()).plan(workload_id, inputs, maximum)
             if plan.total_seconds + config.service_delay > 3600:
@@ -245,6 +248,8 @@ async def generate(request):
                                           retry_after_seconds=decision.retry_after_seconds), status=status, headers=headers)
         state.accepted += 1
         state.input_consumed += inputs
+        # 전체 통계와 같은 입장 시점에 집계. 거절된 재시도는 사용량에 포함하지 않는다.
+        counts["input_tokens_consumed"] += inputs
         state.output_reserved += maximum
         ready = asyncio.get_running_loop().create_future()
         if state.active < config.slots:
@@ -285,6 +290,8 @@ async def generate(request):
             state.quota.settle_output(maximum, generated)
             state.output_reserved -= maximum
             state.output_consumed += generated
+            # 예약 상한 대신 완료 또는 취소 시 실제 모의 생성량만 더한다.
+            counts["output_tokens_consumed"] += generated
             if succeeded:
                 state.completed += 1
                 counts["completed"] += 1
