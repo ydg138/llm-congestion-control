@@ -1,8 +1,10 @@
 """명령줄 실행기: 실험 조건(runner/experiments.py)을 시드별로 반복해 돌린다.
 
 예:
-    python -m runner.run --exp minimum --server-dir ..\\CN_Server              # E1·E3 × 시드 1~5 (35회)
-    python -m runner.run --exp E1 --controller C2 --seed 1 --server-dir ..\\CN_Server
+    python -m runner.run --exp minimum                          # E1·E3 × 시드 1~5 (35회)
+    python -m runner.run --exp E1 --controller C2 --seed 1
+
+서버는 이 저장소의 server/를 .venv\\Scripts\\python.exe로 띄운다. 다른 서버 폴더는 --server-dir로 준다.
 
 명령 한 번의 결과는 results/<exp>_<YYYYmmdd-HHMMSS>/ 폴더 하나에 모인다:
     <exp>_<controller>_seed<seed>_<run_id>.csv          요청 로그 (docs/interface.md 3절)
@@ -30,7 +32,8 @@ from runner.server_proc import free_port, get_json, start_server, stop_server, w
 from runner.watchdog import Limits, RunAborted, watch
 from runner.workload import make_tasks
 
-RESULTS = Path(__file__).resolve().parents[1] / "results"
+REPO = Path(__file__).resolve().parents[1]                  # 이 저장소 폴더 (server/와 .venv가 있는 곳)
+RESULTS = REPO / "results"
 RUN_COLUMNS = ["exp", "controller", "seed", "run_id", "status", "reason", "check", "csv"]
 
 
@@ -167,7 +170,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--controller", help="이 컨트롤러 조건만 (예: C2, C0-8)")
     p.add_argument("--seed", type=int, help=f"이 시드만 (생략하면 {SEEDS})")
     p.add_argument("--tasks", type=int, help="에이전트당 작업 수 덮어쓰기 (빠른 확인용)")
-    p.add_argument("--server-dir", type=Path, required=True, help="서버 폴더 (.venv 포함)")
+    p.add_argument("--server-dir", type=Path, default=REPO,
+                   help="서버 폴더 (server/와 .venv 포함). 생략하면 이 저장소")
     p.add_argument("--server-config", type=Path, help="서버 설정 덮어쓰기 (생략하면 조건의 설정)")
     p.add_argument("--max-seconds", type=float, default=600.0, help="실행 하나의 전체 시간 상한 (초)")
     p.add_argument("--stall-seconds", type=float, default=30.0, help="이 시간 동안 완료가 없으면 멈춤 (초)")
