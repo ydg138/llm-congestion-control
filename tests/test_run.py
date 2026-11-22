@@ -1,19 +1,20 @@
 """실행 결과 상태(runner.status)와 stats JSON 저장을 손으로 정한 응답으로 확인한다.
 
 run_experiment는 자기 이벤트 루프(asyncio.run)를 만들므로, 가짜 서버는 표준 라이브러리
-http.server를 스레드로 띄운다.
+http.server를 스레드로 띄운다. 명령줄 인자의 기본값도 확인한다.
 """
 
 import csv
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 
 from runner.agent import AgentSpec
 from runner.request_log import RequestLog
-from runner.run import run_experiment, save_stats
+from runner.run import parse_args, run_experiment, save_stats
 from runner.server_proc import free_port
 from runner.watchdog import Limits
 
@@ -117,6 +118,17 @@ def test_stats_json_has_runner_first(server, tmp_path):
     doc = json.loads(path.read_text(encoding="utf-8"))
     assert list(doc)[0] == "runner"                         # 맨 위
     assert doc["runner"] == outcome and doc["completed"] == 3
+
+
+def test_server_dir_defaults_to_this_repo():
+    args = parse_args(["--exp", "minimum"])                 # --server-dir 없이
+    repo = Path(__file__).resolve().parents[1]              # tests/의 상위 = 저장소 폴더
+    assert args.server_dir == repo
+    assert (args.server_dir / "server" / "mock_llm.py").is_file()   # 서버 코드가 실제로 여기 있다
+
+
+def test_server_dir_can_still_be_given(tmp_path):
+    assert parse_args(["--exp", "minimum", "--server-dir", str(tmp_path)]).server_dir == tmp_path
 
 
 def test_runner_saved_even_if_server_is_gone(tmp_path):
