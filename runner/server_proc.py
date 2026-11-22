@@ -1,5 +1,6 @@
-"""가짜 LLM 서버(P1)를 실행마다 새로 띄우고 끈다. Windows 전용 (.venv\\Scripts\\python.exe, taskkill).
+"""실험 서버를 실행마다 새로 띄우고 끈다. Windows 전용 (.venv\\Scripts\\python.exe, taskkill).
 
+서버는 가짜 LLM 서버(server.mock_llm, 기본) 또는 Ollama 중계 서버(runner.real_adapter)다.
 서버를 새로 띄우면 버킷·통계가 초기화되고 새 run_id가 생긴다 (docs/interface.md 1절).
 """
 
@@ -35,17 +36,26 @@ def port_open(port: int) -> bool:
         return s.connect_ex(("127.0.0.1", port)) == 0
 
 
-def start_server(server_dir: Path, config: Path | None, log_dir: Path, port: int,
-                 out_path: Path) -> subprocess.Popen:
-    """서버를 띄운다. 서버는 cwd=server_dir로 돌므로 경로는 모두 절대경로로 넘긴다."""
+def server_command(python: Path, port: int, log_dir: Path, config: Path | None,
+                   module: str = "server.mock_llm", extra_args=()) -> list[str]:
+    """서버를 띄우는 명령. 서버는 cwd=server_dir로 돌므로 경로는 모두 절대경로로 넘긴다.
+
+    module: 가짜 서버(server.mock_llm) 또는 Ollama 중계 서버(runner.real_adapter). extra_args는 뒤에 붙인다.
+    """
+    # -u: 출력 버퍼를 끈다. 강제 종료해도 그때까지 서버가 쓴 출력(실행 중 오류 포함)이 파일에 남는다
+    cmd = [str(python), "-u", "-m", module, "--port", str(port), "--log-dir", str(log_dir.resolve())]
+    if config is not None:
+        cmd += ["--config", str(config.resolve())]
+    return cmd + list(extra_args)
+
+
+def start_server(server_dir: Path, config: Path | None, log_dir: Path, port: int, out_path: Path,
+                 module: str = "server.mock_llm", extra_args=()) -> subprocess.Popen:
+    """서버를 띄운다. module·extra_args를 주지 않으면 가짜 서버다."""
     python = server_dir / ".venv" / "Scripts" / "python.exe"
     if not python.is_file():
         raise FileNotFoundError(f"서버 venv가 없음: {python} (서버의 docs/SERVER_README.md 참고)")
-    # -u: 출력 버퍼를 끈다. 강제 종료해도 그때까지 서버가 쓴 출력(실행 중 오류 포함)이 파일에 남는다
-    cmd = [str(python), "-u", "-m", "server.mock_llm", "--port", str(port),
-           "--log-dir", str(log_dir.resolve())]
-    if config is not None:
-        cmd += ["--config", str(config.resolve())]
+    cmd = server_command(python, port, log_dir, config, module, extra_args)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as out:      # 서버 콘솔 출력 (디버깅용)
         return subprocess.Popen(cmd, cwd=server_dir, stdout=out, stderr=subprocess.STDOUT)
