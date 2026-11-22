@@ -5,7 +5,7 @@ import pytest
 from runner.agent import AgentSpec
 from runner.relay_rules import (
     INSTRUCTION, RelayConfig, Timing, context_size, make_prompt, ollama_payload, seconds,
-    settled_tokens, success_body, target_tokens,
+    settled_tokens, success_body,
 )
 from runner.workload import AGENT_CLASSES, ClassConfig
 from server.config import ServerConfig
@@ -42,14 +42,6 @@ def test_context_size_rounds_up_to_step():
     classes = {**AGENT_CLASSES, "big": ClassConfig(4000, 4000, 640)}
     mixed = light + [AgentSpec("a2", "big", "C2")]
     assert context_size(classes, mixed, cfg) == 5120                      # 4000 + 640 + 256 = 4896 → 5120
-
-
-def test_target_tokens_matches_mock_server_plan():
-    model = LLMModel(ServerConfig().model())
-    expected = model.plan("s1-a1-000", 100, 64).output_tokens
-    assert target_tokens(model, "s1-a1-000", 100, 64) == expected          # 가짜 서버와 같은 길이
-    assert 16 <= expected <= 64                                            # 기본 출력 범위 16~64
-    assert target_tokens(model, "s1-a1-000", 100, 5) <= 5                  # 상한 이하
 
 
 def test_ollama_payload_fixes_num_ctx_and_streams():

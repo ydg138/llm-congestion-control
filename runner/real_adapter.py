@@ -4,12 +4,15 @@
 
 - 한도·통계·헤더는 가짜 서버(server/mock_llm.py)의 State, 미들웨어, 핸들러를 그대로 쓴다 (server/는 고치지 않음)
 - 실행기와 컨트롤러는 그대로다. 접속 주소만 이 서버로 바뀐다
-- 서버 CSV: 가짜 서버와 같은 두 파일 + 요청마다 한 줄인 relay_requests_<run_id>.csv
+- 서버 CSV: 가짜 서버와 같은 두 파일 + Ollama로 보낸 요청마다 한 줄인 relay_requests_<run_id>.csv
+- 응답: 200(생성 완료), 429·422(한도), 529(Ollama 대기열이 가득 참 → 받지 않은 요청으로 되돌림),
+  502 backend_error(그 밖의 Ollama 오류·타임아웃. 실행기는 혼잡이 아닌 오류로 보고 그 작업을 포기)
 """
 
 import argparse
 import csv
 import json
+import math
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -17,11 +20,14 @@ from pathlib import Path
 import aiohttp
 from aiohttp import web
 
-from runner.ollama_client import make_session, server_info, warmup
-from runner.relay_rules import RelayConfig
+from runner.ollama_client import StreamResult, make_session, server_info, stream_generate, warmup
+from runner.relay_rules import (
+    RelayConfig, Timing, make_prompt, ollama_payload, seconds, settled_tokens, success_body,
+)
 from server import mock_llm
 from server.config import ServerConfig
 from server.experiment_log import record_experiment
+from server.model import LLMModel
 from server.rate_limit import MultiQuota, TokenBucket
 
 RELAY_COLUMNS = ["run_id", "elapsed_seconds", "agent_id", "workload_id", "status", "error", "input_tokens",
@@ -107,6 +113,166 @@ async def get_config(request):
     return web.json_response(body)
 
 
+@dataclass(frozen=True)
+class Req:
+    """검증을 마친 /generate 요청."""
+    request_id: str
+    agent_id: str
+    workload_id: str
+    inputs: int                         # 입력 토큰 (요청값, 한도에서 빼는 값)
+    maximum: int                        # 출력 상한 = 출력 예약량
+
+
+def parse_request(payload: dict, config: ServerConfig) -> tuple[Req | None, str | None]:
+    """가짜 서버와 같은 본문 검증. 틀리면 (None, 틀린 필드 이름)."""
+    for name in ("request_id", "agent_id"):
+        if not mock_llm.valid_identifier(payload.get(name)):
+            return None, name
+    workload_id = payload.get("workload_id", payload["request_id"])
+    if not mock_llm.valid_identifier(workload_id):
+        return None, "workload_id"
+    inputs = payload.get("input_tokens", 0)
+    if not mock_llm.integer(inputs):
+        return None, "input_tokens"
+    maximum = payload.get("max_output_tokens", config.output_max)
+    if not mock_llm.integer(maximum, 1, 10**6):
+        return None, "max_output_tokens"
+    return Req(payload["request_id"], payload["agent_id"], workload_id, inputs, maximum), None
+
+
+def admit(state, relay: RelayState, req: Req, base: dict):
+    """계획·문맥 검사와 한도 예약 (lock 안에서 부른다). 통과하면 (None, plan), 거절이면 (응답, None).
+
+    plan은 같은 요청에 대한 가짜 서버의 계획: 목표 출력 길이(output_tokens)와 보정용 예측 시간.
+    """
+    counts = state.agent_stats.setdefault(req.agent_id, {      # 첫 요청 때 등록 (가짜 서버와 같은 네 칸)
+        "completed": 0, "rate_limited": 0, "input_tokens_consumed": 0, "output_tokens_consumed": 0})
+    try:
+        plan = LLMModel(state.config.model()).plan(req.workload_id, req.inputs, req.maximum)
+        if req.inputs + req.maximum + relay.cfg.context_margin > relay.cfg.num_ctx:
+            raise ValueError(f"입력 + 출력 상한 + 여유가 num_ctx {relay.cfg.num_ctx}를 넘음")
+    except ValueError as exc:
+        return web.json_response(dict(base, error="invalid_generation", message=str(exc)), status=422), None
+    decision = state.quota.reserve(req.inputs, req.maximum)    # 요청 1·입력·출력 상한을 함께 검사해 예약
+    if not decision.allowed:
+        return reject(state, counts, base, decision), None
+    state.accepted += 1
+    state.input_consumed += req.inputs
+    counts["input_tokens_consumed"] += req.inputs
+    state.output_reserved += req.maximum
+    state.active += 1                                           # Ollama에 가 있는 요청 수
+    return None, plan
+
+
+def reject(state, counts: dict, base: dict, decision):
+    """한도 부족: 429(기다리면 됨) 또는 422(기다려도 안 됨). 가짜 서버와 같은 본문·헤더."""
+    headers = mock_llm.quota_headers(state)
+    if decision.impossible:
+        return web.json_response(dict(base, error="request_exceeds_capacity", limited_by=decision.limited_by,
+                                      retry_after_seconds=None), status=422, headers=headers)
+    state.rejected += 1
+    counts["rate_limited"] += 1
+    headers["Retry-After"] = str(max(1, math.ceil(decision.retry_after_seconds)))
+    return web.json_response(dict(base, error="rate_limit_exceeded", limited_by=decision.limited_by,
+                                  retry_after_seconds=decision.retry_after_seconds), status=429, headers=headers)
+
+
+def outcome(result: StreamResult) -> int:
+    """Ollama 결과 → 우리 상태 코드. 503(Ollama 대기열이 가득 참)만 529, 그 밖의 오류는 502."""
+    if result.final is not None:
+        return 200
+    return 529 if result.status == 503 else 502
+
+
+def settle(state, relay: RelayState, req: Req, result: StreamResult, status) -> int:
+    """정산 (lock 안에서 부른다). status: 200, 529, 502, "cancelled". 실제 생성량을 돌려준다."""
+    counts = state.agent_stats[req.agent_id]
+    state.active -= 1
+    state.output_reserved -= req.maximum
+    if status == 529:           # 받지 않은 요청으로 되돌린다 (가짜 서버는 한도 검사 전에 529를 낸다)
+        state.quota.requests.refund(1)
+        state.quota.inputs.refund(req.inputs)
+        state.quota.settle_output(req.maximum, 0)
+        state.accepted -= 1
+        state.input_consumed -= req.inputs
+        counts["input_tokens_consumed"] -= req.inputs
+        state.overloaded += 1
+        return 0
+    final = result.final or {}
+    # 200은 Ollama가 센 eval_count, 502·취소는 그때까지 받은 조각 수만큼 생성한 것으로 본다
+    generated = settled_tokens(final.get("eval_count", result.chunks), req.maximum)
+    state.quota.settle_output(req.maximum, generated)          # 예약했지만 쓰지 않은 출력 토큰을 돌려준다
+    state.output_consumed += generated
+    counts["output_tokens_consumed"] += generated
+    if status == 200:
+        state.completed += 1
+        counts["completed"] += 1
+        relay.done_reasons[final.get("done_reason")] = relay.done_reasons.get(final.get("done_reason"), 0) + 1
+        relay.prompt_eval_total += final.get("prompt_eval_count") or 0
+        relay.eval_total += final.get("eval_count") or 0
+        relay.load_max = max(relay.load_max, seconds(final.get("load_duration")) or 0.0)
+    elif status == 502:
+        relay.backend_errors += 1
+    else:
+        state.cancelled += 1
+    return generated
+
+
+def log_relay(state, relay: RelayState, req: Req, plan, result: StreamResult, status, generated: int,
+              arrived: float, active_at_start: int) -> None:
+    """Ollama로 보낸 요청 하나 = relay_requests CSV 한 줄 (429·422는 Ollama에 가지 않아 남기지 않음)."""
+    if relay.log is None:
+        return
+    final = result.final or {}
+    relay.log.writerow({
+        "run_id": state.run_id, "elapsed_seconds": round(time.perf_counter() - state.started_at, 6),
+        "agent_id": req.agent_id, "workload_id": req.workload_id, "status": status,
+        "error": f"{result.error} {result.message}".strip(), "input_tokens": req.inputs,
+        "prompt_eval_count": final.get("prompt_eval_count"), "target_output_tokens": plan.output_tokens,
+        "output_tokens": generated, "done_reason": final.get("done_reason"),
+        "ttft_seconds": None if result.first_chunk is None else result.first_chunk - arrived,
+        "prefill_seconds": seconds(final.get("prompt_eval_duration")),
+        "decode_seconds": seconds(final.get("eval_duration")),
+        "load_seconds": seconds(final.get("load_duration")), "active_at_start": active_at_start})
+    relay.log_file.flush()
+
+
+async def generate(request):
+    """가짜 서버의 generate와 같은 순서: 검증(400) → 계획·문맥(422) → 한도(429·422) → Ollama → 정산 → 응답."""
+    state, relay = request.app[mock_llm.STATE], request.app[RELAY]
+    req, bad = parse_request(await mock_llm.read_json(request), state.config)
+    if bad:
+        return web.json_response({"error": "invalid_field", "field": bad}, status=400)
+    arrived = time.perf_counter()
+    base = {"request_id": req.request_id, "agent_id": req.agent_id, "workload_id": req.workload_id,
+            "run_id": state.run_id, "config_revision": state.revision}
+    async with state.lock:                                      # 예약과 정산은 같은 lock 안에서
+        rejected, plan = admit(state, relay, req, base)
+        if rejected is not None:
+            return rejected
+        active_at_start = state.active
+    prompt = make_prompt(req.workload_id, req.inputs, relay.cfg.prompt_overhead_tokens)
+    # 목표 출력 길이 = 가짜 서버와 같은 계산 → 출력 길이 분포가 같아 차이는 지연에서만 난다
+    payload = ollama_payload(relay.cfg, prompt, plan.output_tokens, state.config.seed)
+    result, status = StreamResult(), "cancelled"
+    try:
+        await stream_generate(relay.session, relay.cfg, payload, result)    # lock 밖: 다른 요청을 막지 않음
+        status = outcome(result)
+    finally:                                    # 클라이언트가 끊어 취소돼도 받은 조각만큼 정산한다
+        async with state.lock:
+            generated = settle(state, relay, req, result, status)
+            headers = mock_llm.quota_headers(state)             # 200은 정산 뒤의 남은 한도
+        log_relay(state, relay, req, plan, result, status, generated, arrived, active_at_start)
+    if status == 529:
+        return web.json_response(dict(base, error="server_overloaded"), status=529)     # 한도 헤더 없음
+    if status == 502:
+        return web.json_response(dict(base, error="backend_error", backend_error=result.error), status=502)
+    timing = Timing(arrived, result.first_chunk or result.finished, result.finished)
+    body = success_body(base, req.inputs, req.maximum, plan.output_tokens, result.final, result.chunks,
+                        timing, plan, state.config.service_delay)
+    return web.json_response(body, headers=headers)
+
+
 def create_app(config: ServerConfig, relay_cfg: RelayConfig, log_dir: Path | None = None) -> web.Application:
     """시작 순서는 cleanup_ctx에 넣은 순서: Ollama 준비 → 서버 CSV(record_experiment) → 중계 서버 요청 CSV."""
     config.validate()
@@ -120,7 +286,8 @@ def create_app(config: ServerConfig, relay_cfg: RelayConfig, log_dir: Path | Non
     if log_dir is not None:
         app.cleanup_ctx.append(lambda app: record_experiment(app[mock_llm.STATE], log_dir))
         app.cleanup_ctx.append(lambda app: relay_log_ctx(app, log_dir))
-    app.add_routes([web.get("/health", health), web.get("/stats", stats), web.get("/config", get_config)])
+    app.add_routes([web.get("/health", health), web.get("/stats", stats), web.get("/config", get_config),
+                    web.post("/generate", generate)])
     return app
 
 

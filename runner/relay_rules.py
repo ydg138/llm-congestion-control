@@ -1,8 +1,8 @@
 """Ollama 중계 서버(runner/real_adapter.py)의 규칙. 네트워크 없이 값만 계산하는 순수 함수.
 
 - 프롬프트: 요청의 input_tokens만큼 단어를 고른다 (작업·입력 크기마다 다르게)
-- 목표 출력 길이: 가짜 서버와 같은 계산 (server/model.py의 LLMModel.plan)
 - 문맥 길이 num_ctx: 조건에 나오는 에이전트 종류에서 계산 (실행마다 고정)
+(목표 출력 길이는 real_adapter.py가 가짜 서버와 같은 계산 LLMModel.plan으로 정한다)
 - Ollama 요청 본문, Ollama 마지막 조각 → 우리 API 2.0의 200 본문, 정산할 생성량
 """
 
@@ -55,11 +55,6 @@ def make_prompt(workload_id: str, input_tokens: int, overhead: int) -> str:
     rng = random.Random(f"{workload_id}:{input_tokens}")    # 문자열 시드: 프로세스가 달라도 같은 난수
     words = [rng.choice(WORDS) for _ in range(max(0, input_tokens - overhead))]
     return " ".join(words) + INSTRUCTION
-
-
-def target_tokens(model, workload_id: str, inputs: int, maximum: int) -> int:
-    """목표 출력 길이. 가짜 서버와 같은 계산이라 같은 seed·workload_id면 같은 길이 (항상 maximum 이하)."""
-    return model.plan(workload_id, inputs, maximum).output_tokens
 
 
 def context_size(classes: dict, agents, cfg: RelayConfig) -> int:

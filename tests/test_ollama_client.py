@@ -49,8 +49,8 @@ def fake_ollama(lines, status=200, delay=0.0, hold=None):
     return app, received
 
 
-async def serve(app):
-    runner = web.AppRunner(app)
+async def serve(app, **runner_options):
+    runner = web.AppRunner(app, **runner_options)
     await runner.setup()
     await web.TCPSite(runner, "127.0.0.1", 0).start()
     return runner, f"http://127.0.0.1:{runner.addresses[0][1]}"

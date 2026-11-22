@@ -2,17 +2,21 @@
 
 import asyncio
 import csv
+import json
 import time
 
 import aiohttp
 import pytest
+from aiohttp import web
 
 from runner.real_adapter import RELAY_COLUMNS, create_app, load_config, parse_args
 from runner.relay_rules import RelayConfig
 from runner.server_proc import free_port
 from server import mock_llm
 from server.config import ServerConfig
+from server.model import LLMModel
 from tests.test_ollama_client import OK_LINES, fake_ollama, serve
+from tests.test_relay_rules import MOCK_200_KEYS, words_of
 
 
 async def start_relay(ollama_url, log_dir=None, config=ServerConfig(), **relay_changes):
@@ -80,3 +84,169 @@ def test_cli_config(tmp_path):
     assert load_config(path).capacity == 1 and load_config(None) == ServerConfig()
     args = parse_args(["--num-ctx", "5120", "--model", "m"])
     assert (args.num_ctx, args.model, args.ollama_url) == (5120, "m", "http://127.0.0.1:11434")
+
+
+# ---------- /generate (3b) ----------
+
+def ollama_for_relay(mode="ok"):
+    """워밍업(num_predict=1)에는 늘 정상으로, 실험 요청에는 mode대로 답하는 가짜 Ollama.
+
+    ok: num_predict개 조각 뒤 done / busy: 503 / crash: 조각 2개 뒤 error / hang: 조각 3개 뒤 멈춤
+    """
+    received, hold = [], asyncio.Event()
+
+    async def generate(request):
+        payload = await request.json()
+        received.append(payload)
+        n = payload["options"]["num_predict"]
+        now = "ok" if n == 1 else mode
+        if now == "busy":
+            return web.json_response({"error": "server busy"}, status=503)
+        response = web.StreamResponse(headers={"Content-Type": "application/x-ndjson"})
+        await response.prepare(request)
+        for _ in range({"ok": n, "crash": 2, "hang": 3}[now]):
+            await response.write(b'{"response":"x","done":false}\n')
+        if now == "crash":
+            await response.write(b'{"error":"model crashed"}\n')
+        elif now == "hang":
+            await hold.wait()
+        else:
+            final = {"done": True, "done_reason": "length", "eval_count": n, "prompt_eval_count": 7,
+                     "prompt_eval_duration": 250_000_000, "eval_duration": 500_000_000, "load_duration": 0}
+            await response.write(json.dumps(final).encode() + b"\n")
+        await response.write_eof()
+        return response
+
+    async def info(request):
+        return web.json_response({"version": "0.0-test", "models": []})
+
+    app = web.Application()
+    app.add_routes([web.post("/api/generate", generate), web.get("/api/version", info), web.get("/api/ps", info)])
+    return app, received, hold
+
+
+async def with_relay(ollama, client, config=ServerConfig(), log_dir=None):
+    """가짜 Ollama와 중계 서버를 띄우고 client(session, 중계 서버 주소)를 돌린 뒤 끈다."""
+    app, _, hold = ollama
+    ollama_runner, ollama_url = await serve(app)
+    relay_app = create_app(config, RelayConfig(ollama_url=ollama_url), log_dir)
+    relay_runner, relay_url = await serve(relay_app, handler_cancellation=True)   # 연결이 끊기면 핸들러 취소
+    try:
+        async with aiohttp.ClientSession() as s:
+            return await client(s, relay_url)
+    finally:
+        hold.set()
+        await relay_runner.cleanup()
+        await ollama_runner.cleanup()
+
+
+def request_body(request_id, agent="a1", workload="s1-a1-000", inputs=100, maximum=64):
+    return {"request_id": request_id, "agent_id": agent, "workload_id": workload,
+            "input_tokens": inputs, "max_output_tokens": maximum}
+
+
+async def post(s, url, payload):
+    async with s.post(url + "/generate", json=payload) as r:
+        return r.status, await r.json(), r.headers
+
+
+def read_csv(path):
+    with open(path, encoding="utf-8", newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def assert_totals_match(stats):
+    """같은 /stats에서 서버 전체 입력·출력 합 = 에이전트별 합 (interface.md 4절)."""
+    agents = stats["agent_stats"].values()
+    assert stats["input_tokens_consumed"] == sum(a["input_tokens_consumed"] for a in agents)
+    assert stats["output_tokens_consumed"] == sum(a["output_tokens_consumed"] for a in agents)
+
+
+def test_success_matches_mock_body_and_token_totals(tmp_path):
+    ollama = ollama_for_relay()
+
+    async def client(s, url):
+        first = await post(s, url, request_body("r1"))
+        await post(s, url, request_body("r2", agent="a2", workload="s1-a2-000", inputs=120))
+        return first, (await get_json(s, url + "/stats"))[0]
+
+    (status, body, headers), stats = asyncio.run(with_relay(ollama, client, log_dir=tmp_path))
+    target = LLMModel(ServerConfig().model()).plan("s1-a1-000", 100, 64).output_tokens
+    assert status == 200 and MOCK_200_KEYS <= set(body)
+    assert body["output_tokens"] == body["target_output_tokens"] == target      # 가짜 서버와 같은 목표 길이
+    assert "X-RateLimit-Remaining" in headers and headers["X-Run-Id"] == stats["run_id"]
+    sent = ollama[1][1]                                                         # [0]은 워밍업
+    assert sent["options"]["num_predict"] == target and len(words_of(sent["prompt"])) == 100
+    assert stats["input_tokens_consumed"] == 220                               # 100 + 120
+    assert_totals_match(stats)
+    assert (stats["accepted"], stats["completed"], stats["active"], stats["output_tokens_reserved"]) == (2, 2, 0, 0)
+    assert stats["ollama"]["done_reasons"] == {"length": 2}
+    rows = read_csv(tmp_path / f"relay_requests_{stats['run_id']}.csv")
+    assert [r["status"] for r in rows] == ["200", "200"] and rows[0]["output_tokens"] == str(target)
+    last = [r for r in read_csv(tmp_path / f"agent_stats_{stats['run_id']}.csv") if r["agent_id"] == "a1"][-1]
+    assert (last["input_tokens_consumed"], last["output_tokens_consumed"]) == ("100", str(target))
+
+
+def test_second_request_gets_429_when_bucket_is_empty():
+    async def client(s, url):
+        await post(s, url, request_body("r1"))
+        return await post(s, url, request_body("r2")), (await get_json(s, url + "/stats"))[0]
+
+    config = ServerConfig(capacity=1, refill_rate=0.000001)                    # 요청 1개만, 거의 안 채워짐
+    (status, body, headers), stats = asyncio.run(with_relay(ollama_for_relay(), client, config=config))
+    assert status == 429 and body["error"] == "rate_limit_exceeded" and body["retry_after_seconds"] > 0
+    assert int(headers["Retry-After"]) >= 1
+    assert stats["rate_limited"] == 1 == stats["agent_stats"]["a1"]["rate_limited"]
+
+
+def test_ollama_busy_becomes_529_and_is_rolled_back():
+    async def client(s, url):
+        return await post(s, url, request_body("r1")), (await get_json(s, url + "/stats"))[0]
+
+    (status, body, headers), stats = asyncio.run(with_relay(ollama_for_relay("busy"), client))
+    assert status == 529 and body["error"] == "server_overloaded" and "X-RateLimit-Remaining" not in headers
+    assert (stats["overloaded"], stats["accepted"], stats["input_tokens_consumed"]) == (1, 0, 0)
+    assert stats["output_tokens_reserved"] == 0 and stats["agent_stats"]["a1"]["input_tokens_consumed"] == 0
+    assert stats["quotas"]["requests"]["remaining"] == pytest.approx(ServerConfig().capacity)  # 요청 1개도 돌려받음
+    assert_totals_match(stats)
+
+
+def test_request_over_num_ctx_is_422_without_calling_ollama():
+    ollama = ollama_for_relay()
+
+    async def client(s, url):
+        return await post(s, url, request_body("r1", inputs=4000))             # 4000 + 64 + 256 > 4096
+
+    status, body, _ = asyncio.run(with_relay(ollama, client))
+    assert status == 422 and body["error"] == "invalid_generation"
+    assert len(ollama[1]) == 1                                                  # 워밍업만 Ollama로 갔다
+
+
+def test_error_mid_stream_is_502_and_settles_received_chunks():
+    async def client(s, url):
+        return await post(s, url, request_body("r1")), (await get_json(s, url + "/stats"))[0]
+
+    (status, body, _), stats = asyncio.run(with_relay(ollama_for_relay("crash"), client))
+    assert status == 502 and body["backend_error"] == "backend_error"
+    assert stats["ollama"]["backend_errors"] == 1 and stats["output_tokens_consumed"] == 2   # 받은 조각 2개
+    assert (stats["completed"], stats["active"], stats["output_tokens_reserved"]) == (0, 0, 0)
+    assert_totals_match(stats)
+
+
+def test_client_disconnect_cancels_and_settles_received_chunks():
+    async def client(s, url):
+        with pytest.raises(TimeoutError):                                       # 실행기 쪽 타임아웃처럼 끊는다
+            async with s.post(url + "/generate", json=request_body("r1"),
+                              timeout=aiohttp.ClientTimeout(total=0.5)) as r:
+                await r.read()
+        for _ in range(50):                                                     # 중계 서버가 취소를 처리할 때까지
+            stats = (await get_json(s, url + "/stats"))[0]
+            if stats["cancelled"]:
+                break
+            await asyncio.sleep(0.05)
+        return stats
+
+    stats = asyncio.run(with_relay(ollama_for_relay("hang"), client))
+    assert (stats["cancelled"], stats["active"], stats["output_tokens_reserved"]) == (1, 0, 0)
+    assert stats["output_tokens_consumed"] == 3 == stats["agent_stats"]["a1"]["output_tokens_consumed"]
+    assert_totals_match(stats)
