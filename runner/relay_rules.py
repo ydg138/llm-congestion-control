@@ -30,6 +30,8 @@ class RelayConfig:
     num_ctx: int = 4096                 # 실행마다 고정 (바뀌면 Ollama가 모델을 다시 올린다고 알고 있음)
     keep_alive: str = "30m"             # 실행 사이에 모델을 내리지 않게
     ollama_timeout_seconds: float = 55.0    # 실행기 요청 타임아웃(60초)보다 먼저 걸리게
+    warmup_timeout_seconds: float = 110.0   # 모델을 처음 올리는 시간 포함. run.py의 준비 대기(120초)보다 짧게
+    info_timeout_seconds: float = 10.0      # /api/version, /api/ps
     prompt_overhead_tokens: int = 0     # 템플릿·지시문이 더하는 토큰 (긴 입력 측정 뒤 정함)
     context_margin: int = 256           # 입력 + 출력 상한 외의 여유
     context_min: int = 4096             # num_ctx 최소값
