@@ -159,6 +159,8 @@ class ExtendedTests(AioHTTPTestCase):
         self.assertEqual(state.quota.outputs.snapshot()["remaining"], 100)
         self.assertEqual(state.quota.inputs.snapshot()["remaining"], 90)
         self.assertEqual(state.quota.requests.snapshot()["remaining"], 99)
+        self.assertEqual(state.agent_stats["a"]["input_tokens_consumed"], 10)
+        self.assertEqual(state.agent_stats["a"]["output_tokens_consumed"], 0)
 
     async def test_cancel_after_first_token_charges_generated_tokens(self):
         await self.change({"output_token_seconds": 60})
@@ -178,6 +180,8 @@ class ExtendedTests(AioHTTPTestCase):
             await asyncio.gather(task, return_exceptions=True)
             await self.until(lambda: self.app[STATE].cancelled == 1)
         self.assertEqual(self.app[STATE].output_consumed, 1)
+        self.assertEqual(self.app[STATE].agent_stats["a"]["input_tokens_consumed"], 10)
+        self.assertEqual(self.app[STATE].agent_stats["a"]["output_tokens_consumed"], 1)
         self.assertEqual(self.app[STATE].quota.outputs.snapshot()["remaining"], 99)
 
 

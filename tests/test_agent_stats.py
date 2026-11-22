@@ -23,9 +23,9 @@ class AgentStatsTests(unittest.IsolatedAsyncioTestCase):
                     cancelled.set()
 
             with patch("server.mock_llm.simulate_processing", new=block):
-                active = asyncio.create_task(client.post("/generate", json={"agent_id": "a", "request_id": "1"}))
+                active = asyncio.create_task(client.post("/generate", json={"agent_id": "a", "request_id": "1", "input_tokens": 7}))
                 await asyncio.wait_for(started.wait(), 3)
-                overload = await client.post("/generate", json={"agent_id": "b", "request_id": "2"})
+                overload = await client.post("/generate", json={"agent_id": "b", "request_id": "2", "input_tokens": 5})
                 self.assertEqual(overload.status, 529)
                 active.cancel()
                 with self.assertRaises(asyncio.CancelledError):
@@ -35,8 +35,8 @@ class AgentStatsTests(unittest.IsolatedAsyncioTestCase):
             stats = await (await client.get("/stats")).json()
             self.assertEqual((stats["cancelled"], stats["overloaded"]), (1, 1))
             self.assertEqual(stats["agent_stats"], {
-                "a": {"completed": 0, "rate_limited": 0},
-                "b": {"completed": 0, "rate_limited": 0},
+                "a": {"completed": 0, "rate_limited": 0, "input_tokens_consumed": 7, "output_tokens_consumed": 0},
+                "b": {"completed": 0, "rate_limited": 0, "input_tokens_consumed": 0, "output_tokens_consumed": 0},
             })
 
     async def test_invalid_unicode_id_rejected_before_counting_or_logging(self):
@@ -74,9 +74,9 @@ class AgentStatsTests(unittest.IsolatedAsyncioTestCase):
             response = await client.get("/stats")
             stats = await response.json()
             self.assertEqual(stats["agent_stats"], {
-                "a": {"completed": 1, "rate_limited": 2},
-                "b": {"completed": 1, "rate_limited": 0},
-                "c": {"completed": 0, "rate_limited": 0},
+                "a": {"completed": 1, "rate_limited": 2, "input_tokens_consumed": 0, "output_tokens_consumed": 1},
+                "b": {"completed": 1, "rate_limited": 0, "input_tokens_consumed": 0, "output_tokens_consumed": 1},
+                "c": {"completed": 0, "rate_limited": 0, "input_tokens_consumed": 0, "output_tokens_consumed": 0},
             })
             self.assertEqual((stats["completed"], stats["rate_limited"]), (2, 2))
             run_id = response.headers["X-Run-Id"]

@@ -79,7 +79,17 @@ Remaining은 소수 잔량의 내림값. **200은 완료·정산 후**, 거절�
 - `/stats`: accepted/rate_limited/overloaded/completed/cancelled, active/queued 및 기본 설정. 추가 input_tokens_consumed/output_tokens_consumed/output_tokens_reserved, 3종 quotas snapshot, config_revision, scenario_status. 정상 종료 후 accepted = completed + cancelled. 진행 중에는 active+queued도 포함. 입력·422 오류는 수락/거절 통계에 포함하지 않음.
 - `/config`: 전체 설정, revision, 변경 내역(실제 elapsed_seconds·source·changes), 시나리오 상태, 관리 변경 활성 여부. 관리 토큰은 공개하지 않음. 조회는 요청 한도를 소비하지 않음.
 
-`/stats`의 `agent_stats`는 에이전트 ID를 키로 사용합니다. 예를 들어 `{"agent-a":{"completed":1,"rate_limited":2}}`는 완료 1건과 HTTP 429 응답 2건입니다. 한 작업의 재시도도 각각 집계합니다. 422, 529, 처리 중 취소는 두 수에 포함하지 않습니다.
+`/stats`의 `agent_stats`는 에이전트 ID를 키로 사용합니다. 예를 들어 `{"agent-a":{"completed":1,"rate_limited":2,"input_tokens_consumed":100,"output_tokens_consumed":30}}`는 완료 1건과 HTTP 429 응답 2건입니다. 한 작업의 재시도도 각각 집계합니다. 422, 529, 처리 중 취소는 두 수에 포함하지 않습니다.
+
+### 에이전트별 실제 토큰 사용량
+
+`input_tokens_consumed`는 요청 수락 시 입력 전량을 누적합니다. 수락 후 대기·prefill 중 취소해도 유지합니다. `output_tokens_consumed`는 완료·취소 시 실제 모의 생성량을 누적합니다. 예약한 max_output_tokens는 포함하지 않습니다. 대기·prefill 취소 시 출력은 0이며 decode 취소 시 부분 생성량을 포함합니다. 이는 위 한도 정산과 서버 전체 통계와 동일한 기준입니다.
+
+수락 전 400·422·429·529는 토큰 사용량 0입니다. 429 재시도는 rate_limited만 증가합니다. 같은 workload_id도 다시 수락되면 사용량이 다시 발생합니다. 완료 후 응답 유실 시에도 서버 사용량은 유지됩니다.
+
+에이전트별 합은 동시 조회한 서버 전체 입력·출력 합과 같습니다. 정상 완료·취소/유실 없는 실행에서는 성공(200) 요청 로그의 input_tokens/output_tokens 합과 비교합니다. 취소·진행 중 요청이 있으면 성공 로그와 직접 같다고 볼 수 없습니다. 서버 재시작 시 전부 초기화합니다.
+
+에이전트 CSV에는 기존 5열 뒤에 두 토큰 열을 추가합니다. 토큰만 바뀌어도 다음 표본에 기록하고, 에이전트별 마지막 행을 사용합니다(누계 행 전체를 합산하지 않음). 과거 CSV에는 새 열이 없으므로 분석기는 열 존재 여부를 확인해야 합니다.
 
 ### 서버 경과 시간
 
@@ -96,7 +106,7 @@ P3 실행기는 실험 시작 직전에 `/stats`를 조회하고 `run_id`가 이
 | 파일 | CSV 열 |
 |---|---|
 | `server_state_<run_id>.csv` | `run_id,elapsed_seconds,queued,active,requests_remaining,input_tokens_remaining,output_tokens_remaining` |
-| `agent_stats_<run_id>.csv` | `run_id,elapsed_seconds,agent_id,completed,rate_limited` |
+| `agent_stats_<run_id>.csv` | `run_id,elapsed_seconds,agent_id,completed,rate_limited,input_tokens_consumed,output_tokens_consumed` |
 
 서버 상태는 시작 시, 약 0.1초 간격, 정상 종료 시에 기록합니다. 각 행은 실제 관측 시점의 값이며, 짧은 대기나 혼잡은 표본 사이에 끝날 수 있습니다. 에이전트별 누계는 요청 처리 중 갱신하고, 표본 시점에 직전 기록과 다른 에이전트만 CSV에 추가합니다. 최종 값은 같은 실행·에이전트의 마지막 행입니다. 프로세스를 강제 종료하면 마지막 표본 이후 변경이 파일에 남지 않을 수 있습니다.
 
@@ -126,3 +136,16 @@ P3 실행기는 실험 시작 직전에 `/stats`를 조회하고 `run_id`가 이
 `--scenario`는 `[{"at_seconds":5,"changes":{"slots":1}}]` 형식. 최대1000개, 오름차순0..86400초, 서버 시작 시각 기준. 미리 전체 시나리오를 검증합니다. 수동 변경과 충돌해 실행 시 실패하면 scenario_status에 failed 이유를 기록하고 후속 이벤트를 중단합니다. 실제 적용 시각은 event loop 지연을 포함합니다. 재시작하면 시드/설정 파일을 다시 읽고 버킷과 통계 초기화, 새 run_id 생성.
 
 단일 프로세스가 실험 상태를 소유합니다. create_app()을 직접 실행하는 경우 AppRunner/web.run_app에 `handler_cancellation=True`를 지정해야 연결 종료 시 취소 정책이 적용됩니다.
+
+
+### 에이전트 토큰 통계 재현 확인
+
+최신 main 기준 프로젝트 가상환경에서 실행합니다.
+
+```sh
+python -m scripts.demo_agent_tokens --serve --port 8088
+```
+
+브라우저에서 `http://127.0.0.1:8088/demo`를 열면 두 C2 에이전트의 완료 결과가 보이고 `/stats`로 이동할 수 있습니다. `--serve`를 빼면 대조 후 정상 종료합니다. 포트가 사용 중이면 `--port`로 다른 포트를 지정합니다. 종료는 Ctrl+C입니다. 데모 화면은 이 스크립트에서만 제공하며 일반 서버의 API에는 추가하지 않습니다.
+
+입력 100토큰(A), 1,000토큰(B)의 요청을 각각 20건 보냅니다. 출력은 상한 20을 예약하고 실제 4토큰씩 생성하므로 A는 입력 2,000·출력 80, B는 입력 20,000·출력 80이 기대값입니다. 요청 로그는 기존 P3 RequestLog/Agent와 C2를 사용하며 `results/agent_tokens_<run_id>/`에 요청 CSV, stats JSON, 서버 CSV, verification.json을 저장합니다. 429 수는 실행 환경에 따라 달라집니다. 집계 기능 확인용이며 E4 성능·공정성 결론을 내리는 설정은 아닙니다.
