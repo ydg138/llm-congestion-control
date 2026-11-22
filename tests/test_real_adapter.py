@@ -9,6 +9,7 @@ import aiohttp
 import pytest
 from aiohttp import web
 
+from runner import real_adapter
 from runner.real_adapter import RELAY_COLUMNS, create_app, load_config, parse_args
 from runner.relay_rules import RelayConfig
 from runner.server_proc import free_port
@@ -250,3 +251,23 @@ def test_client_disconnect_cancels_and_settles_received_chunks():
     assert (stats["cancelled"], stats["active"], stats["output_tokens_reserved"]) == (1, 0, 0)
     assert stats["output_tokens_consumed"] == 3 == stats["agent_stats"]["a1"]["output_tokens_consumed"]
     assert_totals_match(stats)
+
+
+def test_unexpected_exception_is_settled_as_502_not_cancelled(monkeypatch, tmp_path):
+    async def broken(*args, **kwargs):
+        raise RuntimeError("코드 버그 흉내")
+
+    monkeypatch.setattr(real_adapter, "stream_generate", broken)               # 워밍업은 그대로 동작
+
+    async def client(s, url):
+        async with s.post(url + "/generate", json=request_body("r1")) as r:
+            status = r.status
+        return status, (await get_json(s, url + "/stats"))[0]
+
+    status, stats = asyncio.run(with_relay(ollama_for_relay(), client, log_dir=tmp_path))
+    assert status == 500                                                        # 예외는 숨기지 않는다
+    assert (stats["cancelled"], stats["ollama"]["backend_errors"]) == (0, 1)    # 취소가 아니라 502로 정산
+    assert (stats["active"], stats["output_tokens_reserved"]) == (0, 0)
+    assert_totals_match(stats)
+    rows = read_csv(tmp_path / f"relay_requests_{stats['run_id']}.csv")
+    assert (rows[0]["status"], rows[0]["error"]) == ("502", "exception RuntimeError")

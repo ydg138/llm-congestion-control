@@ -10,6 +10,7 @@
 """
 
 import argparse
+import asyncio
 import csv
 import json
 import math
@@ -185,7 +186,10 @@ def outcome(result: StreamResult) -> int:
 
 
 def settle(state, relay: RelayState, req: Req, result: StreamResult, status) -> int:
-    """정산 (lock 안에서 부른다). status: 200, 529, 502, "cancelled". 실제 생성량을 돌려준다."""
+    """정산 (lock 안에서 부른다). 실제 생성량을 돌려준다.
+
+    status: 200, 529, 502(Ollama 오류·타임아웃·예상 못 한 예외), "cancelled"(클라이언트가 끊음)
+    """
     counts = state.agent_stats[req.agent_id]
     state.active -= 1
     state.output_reserved -= req.maximum
@@ -254,11 +258,17 @@ async def generate(request):
     prompt = make_prompt(req.workload_id, req.inputs, relay.cfg.prompt_overhead_tokens)
     # 목표 출력 길이 = 가짜 서버와 같은 계산 → 출력 길이 분포가 같아 차이는 지연에서만 난다
     payload = ollama_payload(relay.cfg, prompt, plan.output_tokens, state.config.seed)
-    result, status = StreamResult(), "cancelled"
+    result, status = StreamResult(), 502        # 결과를 정하지 못하고 끝나면 502(backend_error)로 정산
     try:
         await stream_generate(relay.session, relay.cfg, payload, result)    # lock 밖: 다른 요청을 막지 않음
         status = outcome(result)
-    finally:                                    # 클라이언트가 끊어 취소돼도 받은 조각만큼 정산한다
+    except asyncio.CancelledError:              # 클라이언트가 끊음 (handler_cancellation=True)
+        status = "cancelled"
+        raise
+    except Exception as exc:                    # 코드 버그 등: 취소가 아니므로 502로 정산하고 예외는 그대로 올린다
+        result.error = f"exception {type(exc).__name__}"
+        raise
+    finally:                                    # 어떻게 끝나든 받은 조각만큼 정산한다
         async with state.lock:
             generated = settle(state, relay, req, result, status)
             headers = mock_llm.quota_headers(state)             # 200은 정산 뒤의 남은 한도
