@@ -3,7 +3,7 @@
 import csv
 
 from runner.request_log import COLUMNS, RequestLog, log_path
-from runner.workload import ClassConfig, make_tasks
+from runner.workload import AGENT_CLASSES, ClassConfig, make_tasks
 
 
 def test_same_seed_gives_same_tasks():
@@ -28,6 +28,22 @@ def test_light_tokens_in_range():
     for t in make_tasks("a1", "light", 200, seed=3):
         assert 50 <= t.input_tokens <= 150
         assert t.max_output_tokens == 64
+
+
+def test_heavy_in_tokens_in_range():
+    for t in make_tasks("a2", "heavy_in", 200, seed=3):
+        assert 500 <= t.input_tokens <= 1500
+        assert t.max_output_tokens == 64
+
+
+def test_heavy_in_is_light_input_times_ten_same_output_cap():
+    light, heavy = AGENT_CLASSES["light"], AGENT_CLASSES["heavy_in"]
+    assert (heavy.input_min, heavy.input_max) == (10 * light.input_min, 10 * light.input_max)  # 500, 1500
+    assert heavy.max_output_tokens == light.max_output_tokens                                 # 64
+
+
+def test_heavy_in_same_seed_gives_same_tasks():
+    assert make_tasks("a2", "heavy_in", 20, seed=1) == make_tasks("a2", "heavy_in", 20, seed=1)
 
 
 def test_est_tokens_is_input_plus_max_output():
