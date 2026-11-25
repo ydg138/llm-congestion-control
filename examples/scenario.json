@@ -1,0 +1,6 @@
+[
+  {"at_seconds": 5, "changes": {"refill_rate": 5.0, "capacity": 10}},
+  {"at_seconds": 10, "changes": {"refill_rate": 10.0, "capacity": 20}},
+  {"at_seconds": 15, "changes": {"slots": 1}},
+  {"at_seconds": 20, "changes": {"slots": 4}}
+]

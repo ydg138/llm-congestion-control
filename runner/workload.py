@@ -18,10 +18,12 @@ class ClassConfig:
     max_output_tokens: int      # 출력 상한. 재시도해도 같은 값
 
 
-# 에이전트 종류(agent_class)별 분포. 13주차 E4에서 heavy를 한 줄 추가한다.
-# 예: "heavy": ClassConfig(500, 1500, 640)  (요청당 토큰 약 10배, 서버 output_max도 함께 올릴 것)
+# 에이전트 종류(agent_class)별 분포 (docs/interface.md 3절의 agent_class)
 AGENT_CLASSES = {
-    "light": ClassConfig(input_min=50, input_max=150, max_output_tokens=64),
+    "light": ClassConfig(input_min=50, input_max=150, max_output_tokens=64),       # 평균 입력 100
+    # E4: 입력만 light의 10배 (범위도 같은 비율 ±50%, 평균 1000). 서버 input_capacity는 1500 이상이어야 한다
+    # 출력 길이는 서버가 (서버 seed, workload_id)로 정하므로 상한이 같으면 출력 분포도 light와 같다
+    "heavy_in": ClassConfig(input_min=500, input_max=1500, max_output_tokens=64),
 }
 
 

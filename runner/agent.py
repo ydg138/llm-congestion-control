@@ -19,7 +19,7 @@ import aiohttp
 class AgentSpec(NamedTuple):
     """에이전트 한 줄 설정. 튜플 (agent_id, agent_class, controller, start_delay)로 써도 된다."""
     agent_id: str
-    agent_class: str            # "light" 또는 "heavy"
+    agent_class: str            # "light" 또는 "heavy_in" (runner/workload.py의 AGENT_CLASSES)
     controller: str             # make_controller에 넘길 이름 (예: "C2")
     start_delay: float = 0.0    # 실험 시작 후 몇 초 뒤에 합류하나 (E3)
 
@@ -122,7 +122,8 @@ class Agent:
             if self.pending and self.controller.can_send(self.pending[0][0].est_tokens):
                 task, attempt = self.pending.popleft()
                 # on_send를 여기서 바로 불러야 in_flight가 곧바로 늘어 윈도보다 많이 보내지 않는다
-                req_no = self.controller.on_send(task.est_tokens)
+                # 토큰 인자는 모든 컨트롤러에 똑같이 넘긴다 (C3만 쓰고 나머지는 무시)
+                req_no = self.controller.on_send(task.est_tokens, input_tokens=task.input_tokens)
                 t = asyncio.create_task(self._attempt(session, task, attempt, req_no))
                 self.running.add(t)
                 t.add_done_callback(self._finished)
