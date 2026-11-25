@@ -1,6 +1,8 @@
 # C3 설계 초안: 토큰 가중 AIMD (`TokenAIMD`)
 
-11/17 초안. 주말 회의에서 확정하고, 확정되면 `client/controllers.py`에 구현한다. 연구 질문은 `docs/plan.md` 1절.
+11/17 초안. 구현은 `client/controllers.py`의 `TokenAIMD`(PR #12), 설명은 `docs/controllers.md` 7절. 연구 질문은 `docs/plan.md` 1절.
+
+> **11/25 수정**: 처음 초안의 혼잡 회피 식(성공마다 `mss × cost / cwnd`)은 틀렸다. 한 바퀴에 정확히 `cwnd`만큼 성공할 때만 +mss가 되고, 큰 요청이나 윈도에 요청이 하나만 들어가는 경우에는 어긋난다. 아래 3절 4번과 4절 표를 고친 식으로 바꿨다.
 
 ## 1. 한 줄 요약
 
@@ -31,9 +33,9 @@ C2의 윈도 단위를 **요청 수 → 토큰 수**로 바꾼다. 보낼 때 �
 
 1. **보내기**: `in_flight + est <= cwnd`이면 보낸다. 단, 예약 중인 것이 하나도 없으면 `est`가 `cwnd`보다 커도 하나는 보낸다 (안 그러면 큰 요청이 영원히 못 나감).
 2. **정산**: 응답이 오면(200·429·529·오류 모두) 그 요청의 예약량을 `in_flight`에서 뺀다. 요청 번호별 예약량을 기억해 둔다.
-3. **슬로 스타트** (`cwnd < ssthresh`): 성공마다 `cwnd += cost` → 한 바퀴에 2배.
-4. **혼잡 회피**: 성공마다 `cwnd += mss × cost / cwnd` → 한 바퀴(cwnd만큼의 토큰이 성공)에 `+mss`.
-5. **곱셈 감소**: 429·529면 `ssthresh = max(cwnd / 2, min_cwnd)`, `cwnd = ssthresh`. 같은 바퀴의 손실은 한 번만 (C2의 `recover_until` 그대로).
+3. **슬로 스타트** (`cwnd < ssthresh`): 성공마다 `cwnd += min(cost, cwnd)` → 한 바퀴에 최대 2배 (큰 요청 하나로 몇 배씩 뛰지 않게).
+4. **혼잡 회피**: 바퀴의 **첫 성공**에서만 `cwnd += mss`. 바퀴는 C4처럼 요청 번호로 센다: 성공한 요청 번호가 `round_end`보다 크면 새 바퀴로 보고 늘린 뒤 `round_end = 지금까지 보낸 요청 수`. 그래서 요청 크기·개수와 상관없이 한 바퀴에 정확히 `+mss`.
+5. **곱셈 감소**: 429·529면 `ssthresh = max(cwnd / 2, min_cwnd)`, `cwnd = ssthresh`. 같은 바퀴의 손실은 한 번만 (C2의 `recover_until` 그대로). 줄인 바퀴에서는 늘리지 않는다 (`round_end`도 지금까지 보낸 요청 수로).
 6. **오류(422·타임아웃)**: 정산만 하고 윈도는 그대로.
 
 ### 예약량 `est`를 어떻게 정하나 (세 가지를 비교)
@@ -54,9 +56,11 @@ C2는 한 바퀴에 **요청 1개**씩 늘린다. 요청당 1,000토큰인 에�
 
 | 상황 | 계산 | 결과 |
 | --- | --- | --- |
-| cwnd = 1,000, cost 500인 성공 2번 | 1,000 + 100×500/1,000 = 1,050 → 1,050 + 100×500/1,050 ≈ 1,097.6 | 한 바퀴에 약 +100 |
-| cwnd = 1,000, cost 100인 성공 10번 | 매번 +100×100/cwnd, 10번 | 약 1,095.9 (한 바퀴에 약 +100, 요청 크기와 무관) |
-| 슬로 스타트, cwnd = 1,000, cost 300 성공 | 1,000 + 300 | 1,300 |
+| cwnd = 1,000, 같은 바퀴에서 cost 500인 성공 2번 | 첫 성공 +100, 둘째는 같은 바퀴라 그대로 | 1,100 |
+| cwnd = 1,000, 같은 바퀴에서 cost 100인 성공 10번 | 첫 성공만 +100 | 1,100 (요청 크기·개수와 무관) |
+| cwnd = 500, cost 10,064인 큰 요청 하나 성공 | 첫 성공 +100 | 600 (처음 식이면 +10,064) |
+| 슬로 스타트, cwnd = 1,000, cost 300 성공 | 1,000 + min(300, 1,000) | 1,300 |
+| 슬로 스타트, cwnd = 500, cost 1,200 성공 | 500 + min(1,200, 500) | 1,000 (최대 2배) |
 | cwnd = 2,000에서 429 | ssthresh = 1,000, cwnd = 1,000 | 절반 |
 | in_flight = 0, cwnd = 500, est = 1,200 | 하나도 없으니 보냄 | 보냄 (in_flight = 1,200) |
 | in_flight = 1,200, cwnd = 1,500, est = 400 | 1,600 > 1,500 | 못 보냄 |
@@ -96,14 +100,14 @@ C2는 한 바퀴에 **요청 1개**씩 늘린다. 요청당 1,000토큰인 에�
 
 ## 7. 인터페이스 (바뀌는 것)
 
-- 실행기는 `can_send(est_tokens)`, `on_send(est_tokens)`에 `input_tokens + max_output_tokens`를 넘긴다 (`docs/interface.md` 2절, 이미 반영). C3-ewma는 그중 `max_output_tokens` 부분을 자기 예상으로 바꿔 쓴다. 그러려면 C3가 입력 토큰을 따로 알아야 하므로 **`on_send(est_tokens, input_tokens=0)`** 인자를 추가했다 (11/18, 모든 컨트롤러가 받고 C3 말고는 무시).
+- 실행기는 `can_send(est_tokens)`, `on_send(est_tokens)`에 `input_tokens + max_output_tokens`를 넘긴다 (`docs/interface.md` 2절, 이미 반영). C3-ewma는 그중 `max_output_tokens` 부분을 자기 예상으로 바꿔 쓴다. 그러려면 C3가 입력 토큰을 따로 알아야 하므로 **`can_send`·`on_send`에 `input_tokens=0`** 인자를 추가했다 (11/18 `on_send`, PR #12·#22에서 `can_send`까지. 모든 컨트롤러가 받고 C3 말고는 무시).
 - C3-oracle은 실제 출력 길이가 필요하다. 출력 길이는 서버가 정하지만, 서버의 계산(`server/model.py`)은 (서버 seed, `output_min`, `output_max`, `workload_id`, `max_output_tokens`)만 쓰는 순수 함수다. 그래서 실행기가 같은 서버 설정 파일로 미리 계산해 **`est_tokens = input + 실제 출력`**으로 넘긴다 (P3 제안, 11/18). 인자를 따로 늘리지 않는다. 서버 코드가 main에 들어온 뒤, 실행 중 설정을 바꾸지 않는 실험에서만 쓴다.
 - `on_success`는 `resp["input_tokens"] + resp["output_tokens"]`로 `cost`를 계산한다.
 - `state()`에 `cwnd`(토큰), `in_flight`(토큰), `ssthresh`, `est_output`(C3-ewma 예상값)을 남긴다. 로그의 `cwnd` 열은 C3만 토큰 단위다.
 
 ## 8. 테스트 계획 (손으로 계산한 값)
 
-4절 표의 여섯 줄을 그대로 테스트로 만든다. 그 외:
+4절 표의 줄을 그대로 테스트로 만든다 (`tests/test_c3.py`). 그 외:
 
 - 정산: 200·429·오류 모두 예약량만큼 `in_flight`가 준다
 - 같은 바퀴 429 여러 개 → 한 번만 절반
