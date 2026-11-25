@@ -4,20 +4,29 @@
     make_controller("C0-32")              # 고정 동시성 32
     make_controller("C1", seed=3)         # 지터 시드 3
     make_controller("C2", ssthresh=16)    # 매개변수 덮어쓰기
+    make_controller("C3-ewma")            # 토큰 윈도, 예약량은 입력 + 예상 출력
 """
 
 from client.controllers import (
     AIMDConfig, AIMDWindow, BackoffConfig, DelayBased, DelayConfig, ExplicitAIMD, FixedBackoff,
-    FixedConfig, FixedWindow,
+    FixedConfig, FixedWindow, TokenAIMD, TokenConfig,
 )
 
 # E1에서 이름만 바꿔 돌릴 수 있는 목록
-NAMES = ("C0-1", "C0-8", "C0-32", "C0-64", "C1", "C2", "C4", "C5")
+NAMES = ("C0-1", "C0-8", "C0-32", "C0-64", "C1", "C2", "C3", "C3-ewma", "C3-oracle", "C4", "C5")
+
+# C3 이름 뒤에 붙는 것 → 예약량 방식. oracle은 컨트롤러가 max와 같고, 실행기가 실제 출력으로 est_tokens를 넘긴다
+C3_ESTIMATES = {"": "max", "ewma": "ewma", "oracle": "max"}
 
 
 def make_controller(name: str, seed: int = 0, **params):
     """name의 '-' 뒤 숫자는 window로 쓴다 (C0·C1만). seed는 무작위를 쓰는 C1에만 넘긴다."""
     kind, _, size = name.partition("-")
+    if kind == "C3":
+        if size not in C3_ESTIMATES:
+            raise ValueError(f"{name}: C3 뒤에는 -ewma 또는 -oracle만 붙일 수 있다")
+        params.setdefault("estimate", C3_ESTIMATES[size])
+        return TokenAIMD(TokenConfig(**params))
     if size:
         if kind not in ("C0", "C1"):
             raise ValueError(f"{name}: '-숫자'는 C0·C1에서만 쓸 수 있다")

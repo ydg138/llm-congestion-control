@@ -19,7 +19,7 @@ import aiohttp
 class AgentSpec(NamedTuple):
     """에이전트 한 줄 설정. 튜플 (agent_id, agent_class, controller, start_delay)로 써도 된다."""
     agent_id: str
-    agent_class: str            # "light" 또는 "heavy"
+    agent_class: str            # "light" 또는 "heavy_in" (runner/workload.py의 AGENT_CLASSES)
     controller: str             # make_controller에 넘길 이름 (예: "C2")
     start_delay: float = 0.0    # 실험 시작 후 몇 초 뒤에 합류하나 (E3)
 
@@ -119,7 +119,9 @@ class Agent:
         while self.pending or self.running:
             if self.errors:
                 raise self.errors[0]
-            if self.pending and self.controller.can_send(self.pending[0][0].est_tokens):
+            # can_send에도 맨 앞 작업의 토큰을 on_send와 똑같이 넘긴다 (C3-ewma는 input_tokens로 예약량을 계산)
+            if self.pending and self.controller.can_send(self.pending[0][0].est_tokens,
+                                                         input_tokens=self.pending[0][0].input_tokens):
                 task, attempt = self.pending.popleft()
                 # on_send를 여기서 바로 불러야 in_flight가 곧바로 늘어 윈도보다 많이 보내지 않는다
                 # 토큰 인자는 모든 컨트롤러에 똑같이 넘긴다 (C3만 쓰고 나머지는 무시)
