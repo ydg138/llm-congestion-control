@@ -1,10 +1,11 @@
-"""컨트롤러 C0~C2: 에이전트가 요청을 언제, 몇 개 보낼지 정한다.
+"""컨트롤러 C0~C5: 에이전트가 요청을 언제, 몇 개 보낼지 정한다.
 
 순수 로직만 둔다 (asyncio·HTTP 없음). 실행기(runner/agent.py)가 응답을 받을 때마다
 아래 메서드를 불러 준다.
 
-    can_send(est_tokens)            -> 지금 하나 더 보내도 되나
-    on_send(est_tokens)             -> 요청 번호(req_no)를 돌려줌
+    can_send(est_tokens, input_tokens)  -> 지금 하나 더 보내도 되나
+    on_send(est_tokens, input_tokens)   -> 요청 번호(req_no)를 돌려줌
+    (est_tokens = 입력 + 출력 상한, input_tokens = 입력. 토큰 인자는 C3만 쓴다)
     on_success(req_no, resp)        -> 200
     on_rate_limited(req_no, retry_after)  -> 429 (내 한도 초과)
     on_overloaded(req_no)           -> 529 (서버 전체 과부하)
@@ -53,6 +54,17 @@ class DelayConfig:
     max_window: float = 128.0   # 윈도 상한
 
 
+@dataclass(frozen=True)
+class TokenConfig:
+    init_cwnd: float = 2000.0       # 처음 토큰 윈도
+    ssthresh: float = 1_000_000.0   # 크게 두고 첫 손실로 찾게 한다 (RFC 5681)
+    mss: float = 500.0              # 혼잡 회피에서 한 바퀴에 늘리는 토큰 (모든 에이전트 같은 값)
+    min_cwnd: float = 500.0         # 줄여도 이 아래로는 안 감
+    max_cwnd: float = 10_000_000.0  # 토큰 윈도 상한
+    alpha: float = 0.125            # 출력 길이 EWMA 가중치 (TCP RTT 추정과 같은 1/8)
+    estimate: str = "max"           # 예약량: "max"(입력 + 출력 상한) 또는 "ewma"(입력 + 예상 출력)
+
+
 # ---------- 공통 뼈대 ----------
 
 class BaseController:
@@ -64,10 +76,11 @@ class BaseController:
         self.in_flight = 0      # 응답을 기다리는 요청 수
         self.sent = 0           # 지금까지 발급한 마지막 요청 번호
 
-    def can_send(self, est_tokens: int = 0) -> bool:
+    def can_send(self, est_tokens: int = 0, input_tokens: int = 0) -> bool:
         return self.in_flight < int(self.cwnd)
 
-    def on_send(self, est_tokens: int = 0) -> int:
+    def on_send(self, est_tokens: int = 0, input_tokens: int = 0) -> int:
+        """est_tokens·input_tokens는 C3(토큰 윈도)만 쓴다. 나머지는 받기만 하고 무시한다."""
         self.in_flight += 1
         self.sent += 1
         return self.sent        # 요청 번호를 돌려줘 응답과 짝짓는다
@@ -159,6 +172,94 @@ class AIMDWindow(BaseController):
         self.recover_until = self.sent      # 지금까지 보낸 요청은 같은 바퀴
 
 
+# ---------- C3: 토큰 가중 AIMD (docs/c3_design.md) ----------
+
+class TokenAIMD(BaseController):
+    """윈도를 요청 수가 아니라 토큰으로 잡는 AIMD.
+
+    보낼 때 토큰을 예약하고, 응답이 오면 정산한다. 혼잡 회피에서는 요청 크기·개수와 상관없이
+    한 바퀴에 mss 토큰씩 늘린다. 그래서 크기가 다른 에이전트도 같은 토큰 몫으로 모인다.
+    한 바퀴 = 바퀴를 시작할 때까지 보낸 요청이 돌아오는 동안 (C4의 round_end와 같은 방식).
+    cwnd·in_flight·ssthresh는 모두 토큰 단위다.
+    """
+
+    def __init__(self, cfg: TokenConfig | None = None):
+        self.cfg = cfg or TokenConfig()
+        super().__init__(cwnd=float(self.cfg.init_cwnd))
+        self.ssthresh = float(self.cfg.ssthresh)
+        self.reserved = {}          # 요청 번호 → 예약한 토큰
+        self.recover_until = 0      # 이 번호까지는 이미 줄인 바퀴로 본다
+        self.round_end = 0          # 이 번호까지 보낸 요청은 이미 늘린 바퀴로 본다
+        self.est_output = None      # 출력 길이 EWMA (C3-ewma, 첫 응답 전에는 None)
+
+    def _reserve(self, est_tokens: int, input_tokens: int) -> float:
+        """이번 요청에 예약할 토큰. 출력 길이는 끝나야 알므로 상한이나 예상값으로 잡는다."""
+        if self.cfg.estimate == "ewma" and self.est_output is not None:
+            return input_tokens + self.est_output
+        return float(est_tokens)    # 입력 + 출력 상한 (서버가 실제로 꺼내는 양과 같음)
+
+    def can_send(self, est_tokens: int = 0, input_tokens: int = 0) -> bool:
+        if not self.reserved:       # 예약 중인 게 없으면 큰 요청도 하나는 보낸다
+            return True
+        return self.in_flight + self._reserve(est_tokens, input_tokens) <= self.cwnd
+
+    def on_send(self, est_tokens: int = 0, input_tokens: int = 0) -> int:
+        self.sent += 1
+        amount = self._reserve(est_tokens, input_tokens)
+        self.reserved[self.sent] = amount
+        self.in_flight += amount    # 보냈지만 응답이 안 온 토큰
+        return self.sent
+
+    def _settle(self, req_no: int) -> None:
+        """응답이 오면(종류와 상관없이) 예약했던 토큰을 돌려받는다."""
+        self.in_flight = max(0.0, self.in_flight - self.reserved.pop(req_no, 0.0))
+
+    def on_success(self, req_no: int, resp: dict | None = None) -> None:
+        reserved = self.reserved.get(req_no, 0.0)
+        self._settle(req_no)
+        resp = resp or {}
+        output = resp.get("output_tokens")
+        if output is None:          # 응답에 토큰 수가 없으면 예약한 만큼 쓴 것으로 본다
+            cost = reserved
+        else:
+            cost = resp.get("input_tokens", 0) + output    # 실제 쓴 토큰 (ACK된 바이트)
+            # 출력 길이 예상: 4주차 RTT 추정과 같은 EWMA
+            if self.est_output is None:
+                self.est_output = float(output)
+            else:
+                self.est_output += self.cfg.alpha * (output - self.est_output)
+        if self.cwnd < self.ssthresh:
+            self.cwnd += min(cost, self.cwnd)   # 슬로 스타트: 실제 쓴 토큰만큼, 한 번에 최대 2배
+        elif req_no > self.round_end:           # 이번 바퀴에서 처음 돌아온 성공
+            self.cwnd += self.cfg.mss           # 혼잡 회피: 한 바퀴에 +mss 토큰 (덧셈 증가, 요청 크기와 무관)
+            self.round_end = self.sent          # 지금까지 보낸 요청이 다 돌아와야 다음 바퀴
+        self.cwnd = min(self.cwnd, self.cfg.max_cwnd)
+
+    def on_rate_limited(self, req_no: int, retry_after: float | None = None) -> None:
+        self._settle(req_no)
+        self._decrease(req_no)
+
+    def on_overloaded(self, req_no: int) -> None:
+        self._settle(req_no)
+        self._decrease(req_no)      # 529도 손실로 보고 절반
+
+    def on_error(self, req_no: int) -> None:
+        self._settle(req_no)        # 혼잡이 아니므로 윈도는 그대로
+
+    def _decrease(self, req_no: int) -> None:
+        if req_no <= self.recover_until:    # 같은 바퀴의 손실은 한 번만 반영
+            return
+        self.ssthresh = max(self.cwnd / 2, self.cfg.min_cwnd)
+        self.cwnd = self.ssthresh           # 곱셈 감소: 절반으로
+        self.recover_until = self.sent      # 지금까지 보낸 요청은 같은 바퀴
+        self.round_end = self.sent          # 줄인 바퀴에서는 늘리지 않는다
+
+    def state(self) -> dict:
+        s = super().state()
+        s.update(est_output=self.est_output, in_flight_reqs=len(self.reserved))
+        return s
+
+
 # ---------- C4: 지연 기반 (TCP Vegas, 넷플릭스 gradient) ----------
 
 class DelayBased(BaseController):
@@ -247,12 +348,12 @@ class ExplicitAIMD(AIMDWindow):
         self.pause_until = 0.0  # 이 시각 전에는 보내지 않는다 (retry-after)
         self.limit = None       # 남은 한도로 정한 동시 요청 상한 (None이면 상한 없음)
 
-    def can_send(self, est_tokens: int = 0) -> bool:
+    def can_send(self, est_tokens: int = 0, input_tokens: int = 0) -> bool:
         if self.clock() < self.pause_until:         # 서버가 기다리라고 한 시간
             return False
         if self.limit is not None and self.in_flight > 0 and self.in_flight >= self.limit:
             return False                            # 남은 한도만큼 이미 보냄 (기다리는 요청이 없으면 1개는 허용)
-        return super().can_send(est_tokens)
+        return super().can_send(est_tokens, input_tokens)
 
     def on_success(self, req_no: int, resp: dict | None = None) -> None:
         super().on_success(req_no, resp)            # C2와 같이 cwnd를 늘림

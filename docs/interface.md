@@ -51,8 +51,8 @@ POST /admin/config                       실행 중 한도·용량 변경 (MOCK_
 
 ```python
 class Controller:
-    def can_send(self, est_tokens: int = 0) -> bool: ...
-    def on_send(self, est_tokens: int = 0) -> int: ...                 # 요청 번호를 돌려줌
+    def can_send(self, est_tokens: int = 0, input_tokens: int = 0) -> bool: ...
+    def on_send(self, est_tokens: int = 0, input_tokens: int = 0) -> int: ...  # 요청 번호를 돌려줌
     def on_success(self, req_no: int, resp: dict) -> None: ...         # 200
     def on_rate_limited(self, req_no: int, retry_after: float | None) -> None: ...  # 429
     def on_overloaded(self, req_no: int) -> None: ...                  # 529
@@ -67,12 +67,13 @@ class Controller:
 | `retry_after` | 429 본문의 `retry_after_seconds` (없으면 `None`) |
 | `on_error` | 혼잡 신호가 아니므로 윈도는 그대로, `in_flight`만 줄인다 |
 | `attempt` | 이번이 몇 번째 재시도인지. 첫 재시도가 1 (C1 백오프용, 나머지는 0초) |
-| `state()` | 항상 `cwnd`, `in_flight`, `ssthresh`. C4는 `min_ttft`, `ttft_ewma`, C5는 `limit`, `pause_until`을 더한다 |
+| `state()` | 항상 `cwnd`, `in_flight`, `ssthresh`. C3는 `est_output`, `in_flight_reqs`(요청 수)를 더하고 `cwnd`·`in_flight`·`ssthresh`가 토큰 단위다. C4는 `min_ttft`, `ttft_ewma`, C5는 `limit`, `pause_until`을 더한다 |
 | `est_tokens` | C3만 쓴다. 실행기는 `can_send`·`on_send`에 이번 요청의 `input_tokens + max_output_tokens`를 넘긴다. 다른 컨트롤러는 무시한다 |
+| `input_tokens` | `on_send`에만. 이번 요청의 입력 토큰 (11/18 추가). C3-ewma가 예약량을 `input + 예상 출력`으로 바꿀 때 쓴다. 실행기는 모든 컨트롤러에 똑같이 넘기고, C3 말고는 무시한다 |
 
-컨트롤러 이름: `C0-1`, `C0-8`, `C0-32`, `C0-64`, `C1`, `C2`, `C4`, `C5` (C3는 13주차). 설명은 `docs/controllers.md`.
+컨트롤러 이름: `C0-1`, `C0-8`, `C0-32`, `C0-64`, `C1`, `C2`, `C3`, `C3-ewma`, `C3-oracle`, `C4`, `C5`. `can_send`·`on_send`의 `input_tokens`는 11/18 추가 (C3-ewma용). 설명은 `docs/controllers.md`.
 
-C3가 들어오면 `on_success`의 `resp`에서 실제 `output_tokens`를 읽어 예약을 정산한다. 실행기 쪽 변경은 위 `est_tokens`를 넘기는 것뿐이다. 세부는 C3 설계 때 이 절에 추가한다.
+C3가 들어오면 `on_success`의 `resp`에서 실제 `output_tokens`를 읽어 예약을 정산한다. 실행기 쪽 변경은 위 `est_tokens`·`input_tokens`를 넘기는 것뿐이다. C3-oracle(실제 출력 길이를 미리 앎)은 실행기가 서버 설정과 같은 출력 길이 계산으로 미리 구한 값을 `est_tokens`에 넣어 넘긴다 (서버 설정을 실행 중 바꾸지 않는 실험만). 세부는 `docs/c3_design.md`.
 
 ## 3. 요청 로그 CSV
 
@@ -84,7 +85,7 @@ t_send, t_done, status, input_tokens, max_output_tokens, output_tokens, ttft_ms,
 retry_after, cwnd, in_flight
 ```
 
-- `agent_class`: `light` 또는 `heavy` (E4용, 11/17 추가). E1·E3은 모두 `light`.
+- `agent_class`: `light`, `heavy_in`(입력이 무거움), `heavy_out`(출력이 무거움) 중 하나 (E4용, 11/18 확정). E1·E3은 모두 `light`.
 - `max_output_tokens`: 요청에 넣은 출력 상한. C3의 출력 예상 오차(`max_output_tokens` − `output_tokens`)를 볼 때 쓴다 (11/17 추가).
 - `output_tokens`: 200일 때만 값이 있고, 나머지는 빈 칸.
 - `cwnd`: C3는 토큰 단위 윈도다. 다른 컨트롤러와 단위가 다르므로 그래프에서 따로 그린다.
@@ -92,10 +93,35 @@ retry_after, cwnd, in_flight
 - `run_id`에는 서버의 `X-Run-Id`를 쓴다 (서버 로그와 연결용).
 - 시각(`t_send`, `t_done`)은 실험 시작부터 지난 초.
 - `cwnd`, `in_flight`는 응답을 처리한 직후의 값.
-- 파일 이름: `results/<exp>_<controller>_seed<seed>_<run_id>.csv`
+- **결과 위치 (11/19 변경)**: 명령 한 번(`python -m runner.run --exp ...`)의 결과는 `results/<명령의 exp>_<YYYYmmdd-HHMMSS>/` 폴더 하나에 모인다. 예: `results/minimum_20261119-150000/`. 빠른 확인이나 다시 돌린 결과가 본 실험과 섞이지 않고, 폴더째 묶어 공유할 수 있다.
+  - 요청 로그: `<결과 폴더>/<exp>_<controller>_seed<seed>_<run_id>.csv` (`<exp>`는 E1·E3 같은 실험 이름)
+  - stats JSON: `<결과 폴더>/<exp>_<controller>_seed<seed>_<run_id>_stats.json`
+  - 서버 CSV와 서버 콘솔 출력: `<결과 폴더>/server/`
+  - 실행 목록: `<결과 폴더>/runs.csv`. 열은 `exp, controller, seed, run_id, status, reason, check, csv`. 분석에는 `status`가 `completed`이고 `check`가 `OK`인 실행만 쓴다.
+- `status`: HTTP 상태 코드. 응답을 받지 못하면 `timeout`(요청 시간 초과) 또는 `conn_error`(연결 실패, 응답을 읽지 못함). 이 둘과 422는 재시도하지 않고 그 작업은 실패로 남는다 (11/17 추가).
+- stats JSON: 실행이 끝난 뒤 서버 `/stats` 원본 맨 위에 `runner`를 붙인 것 (11/17 추가).
+  - `runner.status`: `completed`(모든 작업이 200으로 끝남) 또는 `aborted`(안전장치로 멈춤, 422·`timeout`·`conn_error`로 포기한 작업이 있음, 코드 오류·Ctrl+C)
+  - `runner.reason`: `aborted`인 이유. `completed`면 `null`
+  - `runner.server_elapsed_at_start_seconds`: 실험 시작 직전에 읽은 서버 `/stats`의 `elapsed_seconds`. 서버에 값이 없으면 `null` (11/19 추가). 요청 로그의 `t_send`에 이 값을 더하면 서버 CSV `elapsed_seconds` 시간축의 근삿값이 된다.
+- **`runner.status`가 `aborted`인 실행은 분석에서 뺀다** (11/17 추가). 멈추는 순간 응답을 기다리던 요청은 요청 로그에 없어 서버 숫자와 맞지 않을 수 있다. 확인은 `python -m runner.check_run <요청 로그 CSV>`.
 
 ## 4. 서버 로그 CSV
 
 서버가 0.1초마다 대기열 길이, 처리 중 슬롯 수, 요청·입력·출력 버킷 잔량을 기록하고, `agent_id`별 완료 건수와 429 횟수를 남긴다. 형식은 서버 코드의 문서를 따른다.
 
-**추가 요청 (11/17, E4용)**: `agent_id`별로 **실제로 쓴 입력 토큰 합, 출력 토큰 합**도 남긴다. 토큰 기준 Jain 지수를 서버 쪽 숫자로도 계산해 요청 로그와 대조하기 위해서다. 열 이름과 위치는 P1이 정하고 이 절에 적는다.
+**E4 토큰 집계 (11/20 구현)**: `/stats.agent_stats[agent_id]`에 `input_tokens_consumed`, `output_tokens_consumed`를 추가한다. 서버 전체 통계의 동명 필드와 같은 의미다.
+
+에이전트 CSV `agent_stats_<run_id>.csv`의 열 순서:
+
+```text
+run_id,elapsed_seconds,agent_id,completed,rate_limited,input_tokens_consumed,output_tokens_consumed
+```
+
+- 기존 5개 열을 유지하고 두 열을 끝에 추가했다. CSV는 열 이름으로 읽는다.
+- 입력은 한도 검사 통과 후 수락 시 더한다. 대기열·prefill 중 취소해도 수락한 입력은 유지한다.
+- 출력은 완료·취소 시 실제 모의 생성량만 더한다. `max_output_tokens` 예약량은 사용량이 아니다. 대기·prefill 취소는 출력 0, decode 취소는 부분 생성량이다.
+- 400·422·429·529로 수락 전에 거절된 시도는 토큰 합을 늘리지 않는다. 같은 작업이 여러 번 수락되면 각 수락의 사용량은 집계한다(ID 중복 제거 없음).
+- 누계가 바뀌면 다음 0.1초 표본 또는 정상 종료 시 행을 기록한다. 토큰만 바뀌어도 기록한다. 각 에이전트의 마지막 행이 최종 누계이며 모든 행을 더하면 중복이다.
+- 같은 `/stats` 스냅샷에서 에이전트별 입력/출력 합은 서버 전체 입력/출력 합과 같다. 재시작하면 새 run_id와 빈 agent_stats에서 시작한다.
+- 정상 완료·유실/취소 없는 실행에서는 요청 로그의 **status=200 행만** agent_id별로 묶어 input_tokens/output_tokens를 합산하고 최종 서버 통계·CSV와 비교한다. `active=queued=0`, `cancelled=0` 및 건수 대조를 함께 확인한다. 취소·응답 유실은 서버 사용량이 성공 로그보다 클 수 있어 별도 조사하고 aborted 실행은 분석에서 제외한다.
+- 누적 토큰 합과 초당 사용량을 구분한다. 구간 사용량은 구간 시작·끝 누계의 차이이며 CSV의 표본 간격 한계가 있다. 시간축은 3절의 시작 offset을 사용한다.

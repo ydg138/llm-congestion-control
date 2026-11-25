@@ -60,8 +60,8 @@ docs/       설계 문서
 ## 명령 (만들어지면 갱신)
 
 - 테스트: `pytest -q`
-- 가짜 서버 실행: `python -m server.mock_llm` (예정)
-- 실험 실행: `python -m runner.run --exp E1 --controller C2` (예정)
+- 가짜 서버 실행: `.\.venv\Scripts\python.exe -m server.mock_llm` (기본 주소 `http://127.0.0.1:8000`, 설정은 `--config <파일>`. 자세한 건 `docs/SERVER_README.md`)
+- 실험 실행: `python -m runner.run --exp minimum` (E1·E3 × 시드 5회, 결과는 `results/<exp>_<시각>/`. 서버는 이 저장소의 `server/`를 `.venv`로 띄운다. 다른 서버 폴더를 쓸 때만 `--server-dir <폴더>`)
 - 그래프: `python -m analysis.plot results/<파일>.csv` (예정)
 
 ## 실제 API와 비용
@@ -79,13 +79,15 @@ docs/       설계 문서
 
 ## 역할
 
-| 역할 | 담당 | 맡는 일 | 역할 파일 |
-| --- | --- | --- | --- |
-| P1 서버 | 김준수 | `server/` 가짜 LLM 서버 | `docs/roles/P1_server.md` |
-| P2 컨트롤러 | 양동규 (팀장) | `client/` 컨트롤러 C0~C5 | `docs/roles/P2_controller.md` |
-| P3 실험 | 박준영 | `runner/` 작업량, 실험 실행기, 실제 서버 실험 | `docs/roles/P3_experiments.md` |
-| P4 분석·보고서 | 김경일 | `analysis/`, `reports/`, 주간 보고서, 발표 | `docs/roles/P4_analysis.md` |
+| 역할 | 담당 | GitHub | 맡는 일 | 역할 파일 |
+| --- | --- | --- | --- | --- |
+| P1 서버 | 김준수 | `junsukim0615-collab` | `server/` 가짜 LLM 서버 | `docs/roles/P1_server.md` |
+| P2 컨트롤러 | 양동규 (팀장) | `ydg138` | `client/` 컨트롤러 C0~C5 | `docs/roles/P2_controller.md` |
+| P3 실험 | 박준영 | `ParkJunYeong117` (이전 `0117steve`) | `runner/` 작업량, 실험 실행기, 실제 서버 실험 | `docs/roles/P3_experiments.md` |
+| P4 분석·보고서 | 김경일 | `kki912` | `analysis/`, `reports/`, 주간 보고서, 발표 | `docs/roles/P4_analysis.md` |
+
+기여를 집계할 때는 전체 클론(`--depth` 없이)으로 받고, 커밋 작성자와 PR 작성자를 같이 본다. 병합 커밋은 병합한 사람 이름으로 남는다.
 
 ## 현재 단계
 
-12주차: 최소 단계 관문(E1·E3가 명령 하나로 5회 반복). 13주차부터 C3와 E4(토큰 공정성)가 핵심. 자세한 할 일은 `docs/week12.md`, 지난 주차 기록은 `docs/week10.md`.
+13주차: E4(토큰 공정성)와 C3 증가식 수정. **개발은 11/30 마감**, 12/1부터는 재실행·분석·발표 준비만. 연구 질문은 그대로 두고, 병목 종류에 따라 결과가 다른 점은 한계로 적는다 (11/23 회의). 자세한 할 일은 `docs/week13.md`, 지난 주차 기록은 `docs/week12.md`·`docs/week10.md`.
