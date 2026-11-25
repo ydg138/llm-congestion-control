@@ -17,12 +17,12 @@ def ca(cwnd=1000.0, **kw):
 
 
 def test_congestion_avoidance_two_successes_of_500():
-    # 1,000 + 100×500/1,000 = 1,050 → 1,050 + 100×500/1,050 ≈ 1,097.62 (한 바퀴에 약 +100)
+    # 같은 바퀴의 성공 2번 → 첫 성공에서 +100, 두 번째는 같은 바퀴라 그대로: 1,100
     c = ca()
     nos = [c.on_send(500, 400), c.on_send(500, 400)]
     for no in nos:
         c.on_success(no, ok(400, 100))
-    assert c.cwnd == pytest.approx(1097.62, abs=0.01)
+    assert c.cwnd == 1100.0
 
 
 def test_congestion_avoidance_ten_successes_of_100():
@@ -31,7 +31,50 @@ def test_congestion_avoidance_ten_successes_of_100():
     nos = [c.on_send(100, 50) for _ in range(10)]
     for no in nos:
         c.on_success(no, ok(50, 50))
-    assert c.cwnd == pytest.approx(1095.86, abs=0.01)
+    assert c.cwnd == 1100.0
+
+
+def test_big_request_still_plus_mss_per_round():
+    # 11/23에 찾은 결함: 예전 식(mss × cost / cwnd)은 cwnd 500에서 10,064토큰 요청 하나로 +10,064였다
+    c = ca(cwnd=500.0, min_cwnd=500.0)
+    c.on_success(c.on_send(10_064, 10_000), ok(10_000, 64))
+    assert c.cwnd == 600.0                   # 한 바퀴 +mss(100)
+
+
+def test_window_holding_one_request_still_plus_mss_per_round():
+    # 예전 식은 cwnd 19,000에 10,064토큰 요청 1개씩이면 한 바퀴 +53(mss의 절반)이었다
+    c = ca(cwnd=19_000.0)
+    for _ in range(2):                       # 바퀴 2번, 바퀴마다 요청 1개
+        c.on_success(c.on_send(10_064, 10_000), ok(10_000, 64))
+    assert c.cwnd == 19_200.0
+
+
+def test_new_round_starts_after_requests_sent_later():
+    # 1·2번을 보낸 뒤 1번 성공(+100, 바퀴 끝 = 2번). 그 뒤 보낸 3번이 돌아오면 새 바퀴
+    c = ca()
+    a, b = c.on_send(100, 50), c.on_send(100, 50)
+    c.on_success(a, ok(50, 50))
+    d = c.on_send(100, 50)
+    c.on_success(b, ok(50, 50))              # 같은 바퀴
+    assert c.cwnd == 1100.0
+    c.on_success(d, ok(50, 50))              # 새 바퀴
+    assert c.cwnd == 1200.0
+
+
+def test_no_increase_in_loss_round():
+    # 2,000에서 1·2번을 보내고 1번이 429 → 1,000. 줄이기 전에 보낸 2번의 성공으로는 늘리지 않는다
+    c = ca(cwnd=2000.0)
+    a, b = c.on_send(100, 50), c.on_send(100, 50)
+    c.on_rate_limited(a)
+    c.on_success(b, ok(50, 50))
+    assert c.cwnd == 1000.0
+
+
+def test_slow_start_at_most_doubles():
+    # 슬로 스타트 500에서 10,064토큰 성공 → 최대 2배인 1,000 (예전에는 10,564)
+    c = TokenAIMD(TokenConfig(init_cwnd=500.0))
+    c.on_success(c.on_send(10_064, 10_000), ok(10_000, 64))
+    assert c.cwnd == 1000.0
 
 
 def test_slow_start_adds_actual_cost():

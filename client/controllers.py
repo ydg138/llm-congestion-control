@@ -177,8 +177,9 @@ class AIMDWindow(BaseController):
 class TokenAIMD(BaseController):
     """윈도를 요청 수가 아니라 토큰으로 잡는 AIMD.
 
-    보낼 때 토큰을 예약하고, 응답이 오면 정산한다. 혼잡 회피에서는 요청 크기와 상관없이
+    보낼 때 토큰을 예약하고, 응답이 오면 정산한다. 혼잡 회피에서는 요청 크기·개수와 상관없이
     한 바퀴에 mss 토큰씩 늘린다. 그래서 크기가 다른 에이전트도 같은 토큰 몫으로 모인다.
+    한 바퀴 = 바퀴를 시작할 때까지 보낸 요청이 돌아오는 동안 (C4의 round_end와 같은 방식).
     cwnd·in_flight·ssthresh는 모두 토큰 단위다.
     """
 
@@ -188,6 +189,7 @@ class TokenAIMD(BaseController):
         self.ssthresh = float(self.cfg.ssthresh)
         self.reserved = {}          # 요청 번호 → 예약한 토큰
         self.recover_until = 0      # 이 번호까지는 이미 줄인 바퀴로 본다
+        self.round_end = 0          # 이 번호까지 보낸 요청은 이미 늘린 바퀴로 본다
         self.est_output = None      # 출력 길이 EWMA (C3-ewma, 첫 응답 전에는 None)
 
     def _reserve(self, est_tokens: int, input_tokens: int) -> float:
@@ -227,9 +229,10 @@ class TokenAIMD(BaseController):
             else:
                 self.est_output += self.cfg.alpha * (output - self.est_output)
         if self.cwnd < self.ssthresh:
-            self.cwnd += cost       # 슬로 스타트: 실제 쓴 토큰만큼 → 한 바퀴에 2배
-        else:
-            self.cwnd += self.cfg.mss * cost / self.cwnd   # 혼잡 회피: 한 바퀴에 +mss 토큰 (덧셈 증가)
+            self.cwnd += min(cost, self.cwnd)   # 슬로 스타트: 실제 쓴 토큰만큼, 한 번에 최대 2배
+        elif req_no > self.round_end:           # 이번 바퀴에서 처음 돌아온 성공
+            self.cwnd += self.cfg.mss           # 혼잡 회피: 한 바퀴에 +mss 토큰 (덧셈 증가, 요청 크기와 무관)
+            self.round_end = self.sent          # 지금까지 보낸 요청이 다 돌아와야 다음 바퀴
         self.cwnd = min(self.cwnd, self.cfg.max_cwnd)
 
     def on_rate_limited(self, req_no: int, retry_after: float | None = None) -> None:
@@ -249,6 +252,7 @@ class TokenAIMD(BaseController):
         self.ssthresh = max(self.cwnd / 2, self.cfg.min_cwnd)
         self.cwnd = self.ssthresh           # 곱셈 감소: 절반으로
         self.recover_until = self.sent      # 지금까지 보낸 요청은 같은 바퀴
+        self.round_end = self.sent          # 줄인 바퀴에서는 늘리지 않는다
 
     def state(self) -> dict:
         s = super().state()
