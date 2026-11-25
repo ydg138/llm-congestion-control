@@ -119,7 +119,9 @@ class Agent:
         while self.pending or self.running:
             if self.errors:
                 raise self.errors[0]
-            if self.pending and self.controller.can_send(self.pending[0][0].est_tokens):
+            # can_send에도 맨 앞 작업의 토큰을 on_send와 똑같이 넘긴다 (C3-ewma는 input_tokens로 예약량을 계산)
+            if self.pending and self.controller.can_send(self.pending[0][0].est_tokens,
+                                                         input_tokens=self.pending[0][0].input_tokens):
                 task, attempt = self.pending.popleft()
                 # on_send를 여기서 바로 불러야 in_flight가 곧바로 늘어 윈도보다 많이 보내지 않는다
                 # 토큰 인자는 모든 컨트롤러에 똑같이 넘긴다 (C3만 쓰고 나머지는 무시)

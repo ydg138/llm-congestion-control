@@ -14,12 +14,17 @@ from runner.workload import Task
 
 
 class RecordingC2(AIMDWindow):
-    """C2 그대로, on_send에 들어온 토큰 인자와 wait_before_retry의 attempt만 기록한다."""
+    """C2 그대로, can_send·on_send에 들어온 토큰 인자와 wait_before_retry의 attempt만 기록한다."""
 
     def __init__(self):
         super().__init__(AIMDConfig(init_cwnd=1))
+        self.can_sends = []
         self.sends = []
         self.retry_attempts = []
+
+    def can_send(self, est_tokens=0, input_tokens=0):
+        self.can_sends.append((est_tokens, input_tokens))
+        return super().can_send(est_tokens, input_tokens)
 
     def on_send(self, est_tokens=0, input_tokens=0):
         self.sends.append((est_tokens, input_tokens))
@@ -81,6 +86,8 @@ def test_retry_goes_before_new_task(tmp_path):
     assert controller.retry_attempts == [1]         # 첫 재시도는 attempt=1
     # on_send: (est_tokens = 입력 + 출력 상한, input_tokens). 재시도도 같은 값
     assert controller.sends == [(164, 100), (164, 100), (184, 120)]
+    # can_send: 맨 앞 작업의 같은 두 값. 윈도가 찼을 때 폴링으로 여러 번 불리므로 종류만 본다
+    assert set(controller.can_sends) == {(164, 100), (184, 120)}
 
     rows = read_rows(path)
     assert [r["status"] for r in rows] == ["429", "200", "200"]
