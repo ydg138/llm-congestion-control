@@ -19,7 +19,7 @@ import aiohttp
 class AgentSpec(NamedTuple):
     """에이전트 한 줄 설정. 튜플 (agent_id, agent_class, controller, start_delay)로 써도 된다."""
     agent_id: str
-    agent_class: str            # "light" 또는 "heavy"
+    agent_class: str            # "light" 또는 "heavy_in" (runner/workload.py의 AGENT_CLASSES)
     controller: str             # make_controller에 넘길 이름 (예: "C2")
     start_delay: float = 0.0    # 실험 시작 후 몇 초 뒤에 합류하나 (E3)
 
