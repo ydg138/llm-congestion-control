@@ -115,14 +115,16 @@ $R = (Get-ChildItem results -Directory -Filter "E6_*" | Sort-Object Name | Selec
 
 `$R`은 가장 최근 E6 결과 폴더다 (실행기 마지막 줄의 `결과 폴더:`와 같아야 함). 측정 폴더는 `E6-measure`라 `E6_*`에 걸리지 않는다.
 
-**합격 기준** (4줄 모두):
+**합격 기준** (조건별, C2·C3 모두):
 
-| 확인 | 도구 | 기준 |
-| --- | --- | --- |
-| 실행 상태 | 실행기 마지막 출력, runs.csv | 모두 completed·대조 OK (종료 코드 0) |
-| 의도한 버킷만 바닥 | e4_check 최소 잔량 | E6-input: 입력만 0% 근처, 요청·출력은 높음. E6-requests: 요청만 0% 근처 |
-| Ollama 오류 | relay_check | 502 0 (invalid_response 0) · 529 0 · 취소 0 |
-| Ollama 대기열 | relay_check 대기 추정 | 10% 미만 |
+| 확인 | 도구 | E6-requests | E6-input |
+| --- | --- | --- | --- |
+| 실행 상태 | 실행기 마지막 출력, runs.csv | completed·대조 OK | completed·대조 OK |
+| 의도한 버킷만 바닥 | e4_check 최소 잔량 | 요청만 0% 근처, 입력·출력은 높음 | 입력만 0% 근처, 요청·출력은 높음 |
+| Ollama 오류 | relay_check | 502 0 (invalid_response 0) · 529 0 · 취소 0 | 같음 |
+| Ollama 대기열 | relay_check `대기 추정(>4)` | 10% 미만 | **기록만** (합격 기준 아님) |
+
+E6-input의 대기 추정을 기록만 하는 이유: 처음 약 10초 동안 light가 입력 버킷을 거의 다 가져가 Ollama에 초당 10건 이상 보내는 것은 구조적이라(가짜 서버 리허설에서 C2·C3 모두 light가 8~10초에 끝남, heavy 429 약 4,800번), 한도를 낮춰도 해결되지 않는다. 에이전트별 값에서 a1만 높으면 이 몰림이다. 결과를 공유할 때 전체·에이전트별 값을 같이 적는다.
 
 **참고값** (합격 기준 아님, 기록만): relay_check의 `참고:` 뒤.
 - TTFT 중앙값: 기준은 0.014초 + 입력 × (3단계 토큰당). a1(light)은 입력 약 100, a2(heavy_in)는 약 1000.
@@ -130,10 +132,10 @@ $R = (Get-ChildItem results -Directory -Filter "E6_*" | Sort-Object Name | Selec
 - 적재 최대: 0에 가까워야 한다 (실행 중에 모델을 다시 올리지 않음).
 
 **기준을 못 넘으면**:
-- 대기 추정이 10% 이상: 한도를 낮춘다. 예: `e6_input.json`의 `input_refill_rate` 1000 → 750. `input_capacity`는 heavy_in 최대 입력 1500 이상이어야 하므로(아니면 422) 2000으로 둔다. `e6_requests.json`은 `capacity`·`refill_rate` 4 → 3.
-- 의도하지 않은 버킷이 바닥: 그 버킷을 키운다.
-- 502·invalid_response가 있음: 본 실행을 미루고 `$R\server\relay_requests_*.csv`의 error 열을 본다.
-- 값을 바꾸면 JSON만 고치고 seed 1을 다시 돌린다. 그다음 `tests/test_experiments.py`의 `test_e6_configs_by_hand` 값과 `runner/experiments.py`의 손계산 주석(초당 5.5건, 110초)을 맞추고, `pytest -q` 통과 후 바꾸기 전후 값과 이유를 적어 커밋한다.
+- E6-requests의 대기 추정이 10% 이상: `e6_requests.json`의 `capacity`·`refill_rate`를 4 → 3으로 낮춘다.
+- 의도하지 않은 버킷이 바닥: 그 버킷을 키운다. 단 `e6_input.json`의 `input_capacity`는 heavy_in 최대 입력 1500 이상이어야 한다 (아니면 422).
+- 502·invalid_response·529·취소가 있음: 본 실행을 미루고 `$R\server\relay_requests_*.csv`의 error 열을 본다.
+- 값을 바꾸면 JSON만 고치고 seed 1을 다시 돌린다. 그다음 `tests/test_experiments.py`의 `test_e6_configs_by_hand` 값과 `runner/experiments.py`의 손계산 주석(초당 4건, 50초 등)을 맞추고, `pytest -q` 통과 후 바꾸기 전후 값과 이유를 적어 커밋한다.
 
 ## 6. E6 본 실행
 
@@ -146,6 +148,8 @@ $R = (Get-ChildItem results -Directory -Filter "E6_*" | Sort-Object Name | Selec
 
 5단계와 같은 기준으로 12줄을 본다. 분석에는 이 폴더만 쓴다 (5단계 보정 폴더는 쓰지 않음).
 
+**결과 해석**: E6의 주 비교는 E6-requests다 (요청 병목이라 요청마다 1씩 빼므로 크기에 따른 비대칭이 없다). E6-input은 같이 도는 구간이 짧고(리허설 8~10초, 슬로 스타트 포함), heavy 한 건이 충전 1초 분량이라(E4는 0.2초) 큰 요청이 막히는 현상이 E4보다 강하므로, 이 한계와 함께 해석한다.
+
 ## 7. 마무리
 
 ```powershell
@@ -154,5 +158,5 @@ Compress-Archive -Path $R, results\E6-measure_1 -DestinationPath "$R.zip"
 
 창 A를 Ctrl+C로 끈다. zip을 팀에 공유하고 아래를 PR #17과 주간 보고에 적는다.
 - 3단계 `prefill_rate` 출력 (표, 직선, 덧붙는 토큰)
-- 5·6단계 `e4_check`·`relay_check` 출력, 한도를 바꿨다면 전후 값과 이유
+- 5·6단계 `e4_check`·`relay_check` 출력 (E6-input의 대기 추정은 전체·에이전트별 값을 함께), 한도를 바꿨다면 전후 값과 이유
 - Ollama 버전(stats JSON의 `ollama.version`), GPU, `OLLAMA_NUM_PARALLEL` (측정 1, E6 4)
