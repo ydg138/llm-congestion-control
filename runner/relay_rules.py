@@ -6,6 +6,7 @@
 - Ollama 요청 본문, Ollama 마지막 조각 → 우리 API 2.0의 200 본문, 정산할 생성량
 """
 
+import json
 import math
 import random
 from dataclasses import dataclass
@@ -77,16 +78,34 @@ def seconds(nanoseconds) -> float | None:
     return nanoseconds / NS_PER_SECOND
 
 
-def settled_tokens(chunks: int, maximum: int) -> int:
-    """정산할 생성량. 출력 예약량(maximum)을 넘으면 settle_output이 ValueError를 내므로 자른다."""
+def is_count(value, maximum: float = math.inf) -> bool:
+    """Ollama가 준 토큰 수가 0 이상 maximum 이하 정수인가. bool은 int의 하위형이라 뺀다 (mock_llm.integer와 같은 규칙)."""
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= maximum
+
+
+def reason_key(done_reason) -> str:
+    """done_reasons 집계 키. 문자열이 아니면 JSON 표기로 바꾼다 (리스트도 키로 쓸 수 있게, 없으면 "null")."""
+    return done_reason if isinstance(done_reason, str) else json.dumps(done_reason)
+
+
+def settled_tokens(status, final: dict, chunks: int, maximum: int) -> int:
+    """정산할 생성량. 어떤 값이 와도 0~maximum 정수를 돌려준다 (settle_output이 예외를 내지 않게).
+
+    200이고 eval_count가 정상(0~maximum 정수)이면 Ollama가 센 eval_count.
+    그 밖(eval_count 키 없음, 502, 취소)은 받은 조각 수를 maximum으로 자른 값 (실제 토큰 수가 아닌 추정값).
+    """
+    count = final.get("eval_count")
+    if status == 200 and is_count(count, maximum):
+        return count
     return min(chunks, maximum)
 
 
-def success_body(base: dict, inputs: int, maximum: int, target: int, final: dict, chunks: int,
+def success_body(base: dict, inputs: int, maximum: int, target: int, final: dict, generated: int,
                  timing: Timing, plan, service_delay: float) -> dict:
     """Ollama 마지막 조각(final)과 중계 서버가 잰 시각을 우리 200 본문으로 바꾼다.
 
     base는 request_id·agent_id·workload_id·run_id·config_revision. 가짜 서버 200의 키는 모두 둔다.
+    generated는 settle이 정산한 생성량 (output_tokens에 그대로 쓴다. eval_count를 다시 읽지 않는다).
     plan은 같은 요청에 대한 가짜 서버 모델의 계획 (보정용 예측값).
     """
     prefill = seconds(final.get("prompt_eval_duration"))
@@ -104,7 +123,7 @@ def success_body(base: dict, inputs: int, maximum: int, target: int, final: dict
     body = dict(base)
     body.update(
         output="ollama response (text omitted)", input_tokens=inputs,
-        output_tokens=settled_tokens(final.get("eval_count", chunks), maximum),
+        output_tokens=generated,
         max_output_tokens=maximum, target_output_tokens=target,
         prompt_eval_count=final.get("prompt_eval_count"), done_reason=final.get("done_reason"),
         queue_wait_seconds=queue_wait, prefill_seconds=prefill,

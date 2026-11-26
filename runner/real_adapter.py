@@ -23,7 +23,8 @@ from aiohttp import web
 
 from runner.ollama_client import StreamResult, make_session, server_info, stream_generate, warmup
 from runner.relay_rules import (
-    RelayConfig, Timing, make_prompt, ollama_payload, seconds, settled_tokens, success_body,
+    RelayConfig, Timing, is_count, make_prompt, ollama_payload, reason_key, seconds, settled_tokens,
+    success_body,
 )
 from server import mock_llm
 from server.config import ServerConfig
@@ -178,19 +179,32 @@ def reject(state, counts: dict, base: dict, decision):
                                   retry_after_seconds=decision.retry_after_seconds), status=429, headers=headers)
 
 
-def outcome(result: StreamResult) -> int:
-    """Ollama 결과 → 우리 상태 코드. 503(Ollama 대기열이 가득 참)만 529, 그 밖의 오류는 502."""
-    if result.final is not None:
-        return 200
-    return 529 if result.status == 503 else 502
+def outcome(result: StreamResult, maximum: int) -> int:
+    """Ollama 결과 → 우리 상태 코드 (정산으로 상태를 바꾸기 전에 부른다).
+
+    마지막 조각이 있으면 200. 단 eval_count가 있는데 0~maximum 정수가 아니면 502 invalid_response
+    (키가 아예 없으면 정상: Ollama는 0인 값을 응답에서 뺀다).
+    마지막 조각이 없으면 503(Ollama 대기열이 가득 참)만 529, 그 밖의 오류는 502.
+    """
+    if result.final is None:
+        return 529 if result.status == 503 else 502
+    if "eval_count" in result.final and not is_count(result.final["eval_count"], maximum):
+        result.error = "invalid_response"
+        result.message = f"eval_count={result.final['eval_count']!r}"[:200]
+        return 502
+    return 200
 
 
 def settle(state, relay: RelayState, req: Req, result: StreamResult, status) -> int:
-    """정산 (lock 안에서 부른다). 실제 생성량을 돌려준다.
+    """정산 (lock 안에서 부른다). 정산한 생성량을 돌려준다.
 
-    status: 200, 529, 502(Ollama 오류·타임아웃·예상 못 한 예외), "cancelled"(클라이언트가 끊음)
+    status: 200, 529, 502(Ollama 오류·타임아웃·이상한 응답·예상 못 한 예외), "cancelled"(클라이언트가 끊음)
+    생성량 계산을 먼저 끝내고 그다음에 상태를 바꾼다 (중간에 예외가 나 반만 정산되는 일이 없게).
     """
     counts = state.agent_stats[req.agent_id]
+    final = result.final or {}
+    # 200은 Ollama가 센 eval_count, 502·취소는 그때까지 받은 조각 수만큼 생성한 것으로 본다
+    generated = 0 if status == 529 else settled_tokens(status, final, result.chunks, req.maximum)
     state.active -= 1
     state.output_reserved -= req.maximum
     if status == 529:           # 받지 않은 요청으로 되돌린다 (가짜 서버는 한도 검사 전에 529를 낸다)
@@ -202,18 +216,17 @@ def settle(state, relay: RelayState, req: Req, result: StreamResult, status) -> 
         counts["input_tokens_consumed"] -= req.inputs
         state.overloaded += 1
         return 0
-    final = result.final or {}
-    # 200은 Ollama가 센 eval_count, 502·취소는 그때까지 받은 조각 수만큼 생성한 것으로 본다
-    generated = settled_tokens(final.get("eval_count", result.chunks), req.maximum)
     state.quota.settle_output(req.maximum, generated)          # 예약했지만 쓰지 않은 출력 토큰을 돌려준다
     state.output_consumed += generated
     counts["output_tokens_consumed"] += generated
     if status == 200:
         state.completed += 1
         counts["completed"] += 1
-        relay.done_reasons[final.get("done_reason")] = relay.done_reasons.get(final.get("done_reason"), 0) + 1
-        relay.prompt_eval_total += final.get("prompt_eval_count") or 0
-        relay.eval_total += final.get("eval_count") or 0
+        reason = reason_key(final.get("done_reason"))
+        relay.done_reasons[reason] = relay.done_reasons.get(reason, 0) + 1
+        prompt_eval, evals = final.get("prompt_eval_count"), final.get("eval_count")
+        relay.prompt_eval_total += prompt_eval if is_count(prompt_eval) else 0     # 0 이상 정수일 때만 (이상해도 실패 아님)
+        relay.eval_total += evals if is_count(evals) else 0
         relay.load_max = max(relay.load_max, seconds(final.get("load_duration")) or 0.0)
     elif status == 502:
         relay.backend_errors += 1
@@ -261,7 +274,7 @@ async def generate(request):
     result, status = StreamResult(), 502        # 결과를 정하지 못하고 끝나면 502(backend_error)로 정산
     try:
         await stream_generate(relay.session, relay.cfg, payload, result)    # lock 밖: 다른 요청을 막지 않음
-        status = outcome(result)
+        status = outcome(result, req.maximum)
     except asyncio.CancelledError:              # 클라이언트가 끊음 (handler_cancellation=True)
         status = "cancelled"
         raise
@@ -278,7 +291,7 @@ async def generate(request):
     if status == 502:
         return web.json_response(dict(base, error="backend_error", backend_error=result.error), status=502)
     timing = Timing(arrived, result.first_chunk or result.finished, result.finished)
-    body = success_body(base, req.inputs, req.maximum, plan.output_tokens, result.final, result.chunks,
+    body = success_body(base, req.inputs, req.maximum, plan.output_tokens, result.final, generated,
                         timing, plan, state.config.service_delay)
     return web.json_response(body, headers=headers)
 

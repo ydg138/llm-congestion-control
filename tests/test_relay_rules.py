@@ -4,8 +4,8 @@ import pytest
 
 from runner.agent import AgentSpec
 from runner.relay_rules import (
-    INSTRUCTION, RelayConfig, Timing, context_size, make_prompt, ollama_payload, seconds,
-    settled_tokens, success_body,
+    INSTRUCTION, RelayConfig, Timing, context_size, is_count, make_prompt, ollama_payload, reason_key,
+    seconds, settled_tokens, success_body,
 )
 from runner.workload import AGENT_CLASSES, ClassConfig
 from server.config import ServerConfig
@@ -50,23 +50,41 @@ def test_ollama_payload_fixes_num_ctx_and_streams():
     assert payload["options"] == {"num_ctx": 5120, "num_predict": 40, "seed": 42}
 
 
-def test_seconds_and_settled_tokens():
+def test_seconds():
     assert seconds(250_000_000) == 0.25                                    # 나노초 → 초
     assert seconds(None) is None and seconds(True) is None
-    assert settled_tokens(70, 64) == 64                                    # 상한으로 자름
-    assert settled_tokens(5, 3) == 3
+
+
+def test_is_count_accepts_only_int_between_0_and_maximum():
+    assert is_count(0, 64) and is_count(64, 64) and is_count(10**9)        # 경계값, 상한 없음
+    for bad in (-1, 65, True, 2.5, "5", None):
+        assert not is_count(bad, 64)
+
+
+def test_settled_tokens_uses_eval_count_only_for_valid_200():
+    assert settled_tokens(200, {"eval_count": 3}, chunks=1, maximum=64) == 3       # 조기 종료: Ollama가 센 값
+    assert settled_tokens(200, {}, chunks=70, maximum=64) == 64                    # 키 없음: 조각 수를 상한으로 자름
+    assert settled_tokens(502, {"eval_count": 5}, chunks=2, maximum=64) == 2       # 502는 조각 수
+    assert settled_tokens("cancelled", {}, chunks=3, maximum=64) == 3              # 취소도 조각 수
+    assert settled_tokens(200, {"eval_count": None}, chunks=2, maximum=64) == 2    # 이상한 값이 와도 예외 없음
+
+
+def test_reason_key_is_always_a_string():
+    assert reason_key("stop") == "stop"
+    assert reason_key(None) == "null"                                      # 없음: 예전 /stats JSON과 같은 표기
+    assert reason_key(["x"]) == '["x"]'                                    # dict 키로 못 쓰는 값
 
 
 def test_success_body_has_mock_keys_and_hand_computed_times():
     plan = LLMModel(ServerConfig().model()).plan("s1-a1-000", 100, 64)
     base = {"request_id": "r", "agent_id": "a1", "workload_id": "s1-a1-000", "run_id": "x",
             "config_revision": 1}
-    final = {"done": True, "eval_count": 70, "prompt_eval_count": 112, "done_reason": "length",
+    final = {"done": True, "eval_count": 40, "prompt_eval_count": 112, "done_reason": "length",
              "prompt_eval_duration": 250_000_000, "load_duration": 50_000_000, "eval_duration": 900_000_000}
     timing = Timing(arrived=10.0, first_chunk=10.5, finished=11.5)
-    body = success_body(base, 100, 64, 40, final, chunks=70, timing=timing, plan=plan, service_delay=0.05)
+    body = success_body(base, 100, 64, 40, final, generated=40, timing=timing, plan=plan, service_delay=0.05)
     assert MOCK_200_KEYS <= set(body)
-    assert body["output_tokens"] == 64                                     # eval_count 70을 상한 64로
+    assert body["output_tokens"] == 40                                     # settle이 정한 값 그대로
     assert body["ttft_seconds"] == pytest.approx(0.5)                      # 10.5 - 10.0
     assert body["server_elapsed_seconds"] == pytest.approx(1.5)            # 11.5 - 10.0
     assert body["queue_wait_seconds"] == pytest.approx(0.2)                # 0.5 - 0.25 - 0.05
@@ -82,15 +100,15 @@ def test_success_body_has_mock_keys_and_hand_computed_times():
 def test_queue_wait_plus_service_is_server_elapsed(prefill_ns, load_ns):
     plan = LLMModel(ServerConfig().model()).plan("w", 100, 64)
     final = {"done": True, "eval_count": 40, "prompt_eval_duration": prefill_ns, "load_duration": load_ns}
-    body = success_body({}, 100, 64, 40, final, chunks=40,
+    body = success_body({}, 100, 64, 40, final, generated=40,
                         timing=Timing(10.0, 10.5, 11.5), plan=plan, service_delay=0.0)
     assert body["queue_wait_seconds"] >= 0
     assert body["queue_wait_seconds"] + body["service_seconds"] == pytest.approx(body["server_elapsed_seconds"])
 
 
-def test_success_body_without_eval_count_uses_chunks():
+def test_success_body_without_eval_count_uses_settled_value():
     plan = LLMModel(ServerConfig().model()).plan("w", 0, 64)
-    body = success_body({}, 0, 64, 10, {"done": True}, chunks=12,
+    body = success_body({}, 0, 64, 10, {"done": True}, generated=12,      # 키 없음: settle이 조각 수 12로 정산
                         timing=Timing(0.0, 0.1, 0.2), plan=plan, service_delay=0.0)
     assert body["output_tokens"] == 12
     assert body["queue_wait_seconds"] is None and body["service_seconds"] is None   # 시간 정보가 없으면 못 나눔
