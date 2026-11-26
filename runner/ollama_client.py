@@ -20,10 +20,10 @@ class StreamResult:
     status: int | None = None           # Ollama HTTP 상태 (연결 실패면 None)
     first_chunk: float | None = None    # 첫 비어 있지 않은 조각을 받은 시각 (perf_counter)
     finished: float | None = None       # 마지막 조각(done=true)을 받은 시각
-    chunks: int = 0                     # 비어 있지 않은 조각 수 (대략 생성한 토큰 수)
+    chunks: int = 0                     # 비어 있지 않은 조각 수 (오류·취소 때 생성량 추정에 씀. 실제 토큰 수와 다를 수 있음)
     final: dict | None = None           # 마지막 조각: eval_count, prompt_eval_count, *_duration, done_reason
     error: str = ""                     # 정상이면 빈 칸
-    message: str = ""                   # Ollama가 보낸 오류 문구 (앞 200자, 원인 확인용)
+    message: str = ""                   # 오류 문구 (앞 200자, 원인 확인용): Ollama가 보낸 문구 또는 이상한 eval_count 값
 
 
 def make_session(cfg: RelayConfig) -> aiohttp.ClientSession:
@@ -40,6 +40,8 @@ async def stream_generate(session, cfg: RelayConfig, payload: dict, result: Stre
 
     error: http_<상태>(503 포함), backend_error(스트림 안의 error), timeout, connection_error,
            invalid_response(JSON이 아니거나 한 줄이 한도보다 김), incomplete_stream(done 없이 끝남)
+    invalid_response는 real_adapter.outcome도 쓴다 (마지막 조각의 eval_count가 0~상한 정수가 아님).
+    어느 쪽인지는 message로 구분한다: 여기서 정하면 빈 칸, outcome이 정하면 "eval_count=<받은 값>".
     취소(CancelledError)는 잡지 않는다. 그때까지 받은 조각 수는 result에 남는다.
     """
     url = cfg.ollama_url.rstrip("/") + "/api/generate"

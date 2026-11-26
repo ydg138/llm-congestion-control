@@ -7,6 +7,16 @@
 - 서버 CSV: 가짜 서버와 같은 두 파일 + Ollama로 보낸 요청마다 한 줄인 relay_requests_<run_id>.csv
 - 응답: 200(생성 완료), 429·422(한도), 529(Ollama 대기열이 가득 참 → 받지 않은 요청으로 되돌림),
   502 backend_error(그 밖의 Ollama 오류·타임아웃. 실행기는 혼잡이 아닌 오류로 보고 그 작업을 포기)
+  502의 backend_error가 invalid_response면 두 가지 중 하나이고, relay CSV error 열의 message로 구분한다:
+  (1) 스트림이 JSON이 아니거나 한 줄이 한도보다 김 (ollama_client, message 없음)
+  (2) 마지막 조각의 eval_count가 0~max_output_tokens 정수가 아님 (outcome, message "eval_count=<받은 값>")
+- 예상 못 한 예외(코드 버그): 클라이언트는 HTTP 500(aiohttp 기본 본문, JSON 아님)을 받고, relay CSV의 status는
+  정산 분류인 502, error는 "exception <예외 이름>". 실행기(runner/agent.py post_generate)는 본문을 JSON으로
+  못 읽어 conn_error로 기록한다 → 500과 502 모두 report()에서 on_error로 같게 처리 (다시 보내지 않음)
+- 토큰 수: input_tokens_consumed는 요청이 말한 입력 수(한도에서 뺀 값)다. Ollama가 실제로 센 입력은
+  prompt_eval_count로 따로 남긴다 (relay CSV, /stats의 ollama.prompt_eval_count_total).
+  output_tokens_consumed는 200이면 Ollama의 eval_count, 502·취소면 받은 조각 수 추정값(실제 토큰 수가 아님)이다.
+  그래서 전체/에이전트 합계가 맞아도 실제 사용량과 같다는 보장은 없다
 """
 
 import argparse
@@ -35,6 +45,8 @@ from server.rate_limit import MultiQuota, TokenBucket
 RELAY_COLUMNS = ["run_id", "elapsed_seconds", "agent_id", "workload_id", "status", "error", "input_tokens",
                  "prompt_eval_count", "target_output_tokens", "output_tokens", "done_reason", "ttft_seconds",
                  "prefill_seconds", "decode_seconds", "load_seconds", "active_at_start"]
+# input_tokens: 요청이 말한 입력 수, prompt_eval_count: Ollama가 실제로 센 입력 수
+# output_tokens: 정산한 생성량. 200은 eval_count, 502·취소는 받은 조각 수 추정값 (실제 토큰 수가 아님)
 # ServerConfig 중 중계 서버가 쓰지 않거나, 가짜 서버 모델의 예측값(model_*_seconds)에만 쓰는 설정
 UNUSED = {"slots": "쓰지 않음 (동시 처리는 Ollama가 정함)", "queue_size": "쓰지 않음",
           "service_delay, base_ttft, input_token_seconds, output_token_seconds": "보정용 예측값에만 씀"}
@@ -48,7 +60,7 @@ class RelayState:
     info: dict = field(default_factory=dict)        # Ollama /api/version, /api/ps 원본 (워밍업 뒤)
     backend_errors: int = 0                         # 502로 바꾼 Ollama 오류 수
     done_reasons: dict = field(default_factory=dict)    # done_reason별 건수 (length, stop)
-    prompt_eval_total: int = 0                      # Ollama가 센 입력 토큰 합
+    prompt_eval_total: int = 0                      # Ollama가 센 입력 토큰 합 (input_tokens_consumed와 따로 둠)
     eval_total: int = 0                             # Ollama가 센 생성 토큰 합
     load_max: float = 0.0                           # 요청 중 가장 긴 모델 적재 시간 (0에 가까워야 함)
     log: csv.DictWriter | None = None               # relay_requests CSV
@@ -121,7 +133,7 @@ class Req:
     request_id: str
     agent_id: str
     workload_id: str
-    inputs: int                         # 입력 토큰 (요청값, 한도에서 빼는 값)
+    inputs: int                         # 입력 토큰 (요청값, 한도에서 빼는 값. 실제 값은 prompt_eval_count)
     maximum: int                        # 출력 상한 = 출력 예약량
 
 
@@ -159,7 +171,7 @@ def admit(state, relay: RelayState, req: Req, base: dict):
     if not decision.allowed:
         return reject(state, counts, base, decision), None
     state.accepted += 1
-    state.input_consumed += req.inputs
+    state.input_consumed += req.inputs                         # 요청이 말한 입력 수 (Ollama가 센 값이 아님)
     counts["input_tokens_consumed"] += req.inputs
     state.output_reserved += req.maximum
     state.active += 1                                           # Ollama에 가 있는 요청 수
@@ -203,7 +215,7 @@ def settle(state, relay: RelayState, req: Req, result: StreamResult, status) -> 
     """
     counts = state.agent_stats[req.agent_id]
     final = result.final or {}
-    # 200은 Ollama가 센 eval_count, 502·취소는 그때까지 받은 조각 수만큼 생성한 것으로 본다
+    # 200은 Ollama가 센 eval_count, 502·취소는 그때까지 받은 조각 수만큼 생성한 것으로 본다 (추정값)
     generated = 0 if status == 529 else settled_tokens(status, final, result.chunks, req.maximum)
     state.active -= 1
     state.output_reserved -= req.maximum
@@ -269,7 +281,8 @@ async def generate(request):
             return rejected
         active_at_start = state.active
     prompt = make_prompt(req.workload_id, req.inputs, relay.cfg.prompt_overhead_tokens)
-    # 목표 출력 길이 = 가짜 서버와 같은 계산 → 출력 길이 분포가 같아 차이는 지연에서만 난다
+    # 목표 출력 길이(num_predict)만 가짜 서버와 같은 계산이다. 실제 생성량은 조기 종료로 더 짧을 수 있다
+    # (done_reason=stop, /stats의 ollama.done_reasons로 확인. 정산은 실제 eval_count로)
     payload = ollama_payload(relay.cfg, prompt, plan.output_tokens, state.config.seed)
     result, status = StreamResult(), 502        # 결과를 정하지 못하고 끝나면 502(backend_error)로 정산
     try:
@@ -279,6 +292,7 @@ async def generate(request):
         status = "cancelled"
         raise
     except Exception as exc:                    # 코드 버그 등: 취소가 아니므로 502로 정산하고 예외는 그대로 올린다
+        # 클라이언트는 HTTP 500, relay CSV는 정산 분류 502 + 이 error. 실행기는 conn_error → on_error (모듈 설명)
         result.error = f"exception {type(exc).__name__}"
         raise
     finally:                                    # 어떻게 끝나든 받은 조각만큼 정산한다
