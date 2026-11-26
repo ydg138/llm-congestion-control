@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from runner import e4_check
+from runner import e4_check, relay_check
 from runner.agent import AgentSpec
 from runner.experiments import E1, E1_SERVER, E3, E6, Condition
 from runner.request_log import RequestLog
@@ -205,3 +205,4 @@ def test_e6_one_run_on_mock_backend(tmp_path):
     assert run["check"] == "OK"
     # e4_check가 E6 결과 폴더에서도 돈다. 줄 앞부분만 본다 (PR #25가 뒤에 열을 붙임)
     assert e4_check.check_run(tmp_path, run).startswith("E6-input C2 seed1: completed·대조 OK | 같이 돈 구간")
+    assert "중계 서버 CSV 없음" in relay_check.check_run(tmp_path, run, 4)     # 가짜 서버는 relay CSV를 쓰지 않음
