@@ -5,9 +5,10 @@
 결과 폴더의 runs.csv에 있는 실행마다 한 줄. 한도 쪽(의도한 버킷만 바닥인지)은 runner/e4_check.py로 본다.
 합격 판단 (docs/e6_runbook.md 5단계):
 - 502(그중 invalid_response), 529(Ollama 대기열이 가득 참), 취소(클라이언트가 끊음): 모두 0이어야 한다
-- 대기 추정: Ollama로 보낼 때 Ollama에 가 있던 요청 수(active_at_start, 자기 포함)가 --parallel
-  (OLLAMA_NUM_PARALLEL)을 넘은 행의 비율. 넘었으면 Ollama 안에서 기다렸을 수 있다.
-  10% 미만이어야 Ollama 대기열이 병목이 아니라고 본다
+- 대기 추정 (전체와 에이전트별): Ollama로 보낼 때 Ollama에 가 있던 요청 수(active_at_start, 자기 포함)가
+  --parallel(OLLAMA_NUM_PARALLEL)을 넘은 행의 비율. 넘었으면 Ollama 안에서 기다렸을 수 있다.
+  10% 미만이어야 Ollama 대기열이 병목이 아니라고 본다 (E6-requests 기준. E6-input은 기록만).
+  에이전트별 값에서 a1(light)만 높으면 E6-input 초반에 light가 몰린 것이다
 그 밖: done_reason별 건수 (200만. length는 목표 길이까지 생성, stop은 모델이 일찍 멈춤)
 참고값 ("참고:" 뒤, 합격 기준 아님):
 - TTFT 중앙값 (에이전트별, 200만). 기준은 0.014초 + 입력 × 토큰당 prefill (runner/prefill_rate.py)
@@ -29,6 +30,11 @@ def read_csv(path: Path) -> list[dict]:
         return list(csv.DictReader(f))
 
 
+def waited_share(rows: list[dict], parallel: int) -> float:
+    """보낼 때 Ollama에 가 있던 요청(자기 포함)이 병렬 수보다 많았던 행의 비율. 행이 없으면 0."""
+    return sum(int(r["active_at_start"]) > parallel for r in rows) / len(rows) if rows else 0.0
+
+
 def summarize(rows: list[dict], parallel: int) -> dict:
     """relay CSV 행(Ollama로 보낸 요청마다 한 줄) → 한 줄에 쓸 값."""
     ok = [r for r in rows if r["status"] == "200"]
@@ -46,7 +52,9 @@ def summarize(rows: list[dict], parallel: int) -> dict:
         "529": sum(r["status"] == "529" for r in rows),
         "cancelled": sum(r["status"] == "cancelled" for r in rows),
         # 보낼 때 Ollama에 가 있던 요청(자기 포함)이 병렬 수보다 많으면 Ollama 안에서 기다렸을 수 있다
-        "waited": sum(int(r["active_at_start"]) > parallel for r in rows) / len(rows) if rows else 0.0,
+        "waited": waited_share(rows, parallel),
+        "waited_by_agent": {agent: waited_share([r for r in rows if r["agent_id"] == agent], parallel)
+                            for agent in sorted({r["agent_id"] for r in rows})},
         "done_reasons": dict(sorted(reasons.items())),
         "ttft": {agent: median(values) for agent, values in sorted(ttft.items())},
         "decode_per_token": sum(d for d, _ in decode) / generated if generated else None,
@@ -61,8 +69,9 @@ def seconds(value: float | None, spec: str) -> str:
 def format_line(name: str, s: dict, parallel: int) -> str:
     reasons = ", ".join(f"{k} {v}" for k, v in s["done_reasons"].items()) or "-"
     ttft = ", ".join(f"{agent} {t:.3f}초" for agent, t in s["ttft"].items()) or "-"
+    by_agent = ", ".join(f"{agent} {w:.0%}" for agent, w in s["waited_by_agent"].items()) or "-"
     return (f"{name}: Ollama 요청 {s['requests']}건 | 502 {s['502']} (invalid_response {s['invalid_response']})"
-            f" · 529 {s['529']} · 취소 {s['cancelled']} | 대기 추정 {s['waited']:.0%} (>{parallel})"
+            f" · 529 {s['529']} · 취소 {s['cancelled']} | 대기 추정(>{parallel}) {s['waited']:.0%} ({by_agent})"
             f" | done_reason {reasons} | 참고: TTFT 중앙값 {ttft}"
             f" · 출력 토큰당 {seconds(s['decode_per_token'], '.4f')} · 적재 최대 {seconds(s['load_max'], '.2f')}")
 
