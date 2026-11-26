@@ -271,3 +271,137 @@ def test_unexpected_exception_is_settled_as_502_not_cancelled(monkeypatch, tmp_p
     assert_totals_match(stats)
     rows = read_csv(tmp_path / f"relay_requests_{stats['run_id']}.csv")
     assert (rows[0]["status"], rows[0]["error"]) == ("502", "exception RuntimeError")
+
+
+# ---------- P1 검토 11/26: 검토자의 reviewer_checks.py에서 옮김 ----------
+
+def test_concurrent_quota_and_totals():
+    async def client(s, url):
+        replies = await asyncio.gather(*[
+            post(s, url, request_body(f"r{i}", agent=f"a{i % 2}")) for i in range(20)
+        ])
+        stats = (await get_json(s, url + "/stats"))[0]
+        assert sum(r[0] == 200 for r in replies) == 3
+        assert sum(r[0] == 429 for r in replies) == 17
+        assert stats["input_tokens_consumed"] == 300
+        assert stats["output_tokens_consumed"] == sum(r[1].get("output_tokens", 0) for r in replies)
+        assert stats["active"] == stats["output_tokens_reserved"] == 0
+        assert_totals_match(stats)
+    asyncio.run(with_relay(ollama_for_relay(), client,
+                          config=ServerConfig(capacity=3, refill_rate=0.000001)))
+
+
+@pytest.mark.parametrize("mode,code,inputs,outputs", [("busy",529,0,0),("crash",502,200,4)])
+def test_two_agents_error_accounting(mode, code, inputs, outputs):
+    async def client(s, url):
+        replies = await asyncio.gather(*[
+            post(s, url, request_body(f"r{i}", agent=f"a{i}")) for i in range(2)
+        ])
+        stats = (await get_json(s, url + "/stats"))[0]
+        assert all(r[0] == code for r in replies)
+        assert stats["input_tokens_consumed"] == inputs
+        assert stats["output_tokens_consumed"] == outputs
+        assert stats["active"] == stats["output_tokens_reserved"] == 0
+        assert_totals_match(stats)
+        if code == 529:
+            for key in ("requests", "input_tokens", "output_tokens"):
+                q = stats["quotas"][key]
+                assert q["remaining"] == q["capacity"]
+    asyncio.run(with_relay(ollama_for_relay(mode), client))
+
+
+def test_early_stop_uses_actual_count(monkeypatch):
+    async def early(session, cfg, payload, result):
+        result.status = 200
+        result.chunks = 1
+        result.first_chunk = result.finished = time.perf_counter()
+        result.final = {"done": True, "done_reason": "stop", "eval_count": 3,
+                        "prompt_eval_count": 125}
+    monkeypatch.setattr(real_adapter, "stream_generate", early)
+    async def client(s, url):
+        reply = await post(s, url, request_body("r"))
+        stats = (await get_json(s, url + "/stats"))[0]
+        assert reply[0] == 200 and reply[1]["output_tokens"] == 3
+        assert stats["output_tokens_consumed"] == 3
+        assert stats["input_tokens_consumed"] == 100
+        assert stats["ollama"]["prompt_eval_count_total"] == 125
+        assert_totals_match(stats)
+    asyncio.run(with_relay(ollama_for_relay(), client))
+
+
+def test_invalid_final_must_not_break_accounting(monkeypatch):
+    async def malformed(session, cfg, payload, result):
+        result.status = 200
+        result.chunks = 2
+        result.first_chunk = result.finished = time.perf_counter()
+        result.final = {"done": True, "eval_count": None}
+    monkeypatch.setattr(real_adapter, "stream_generate", malformed)
+    async def client(s, url):
+        async with s.post(url + "/generate", json=request_body("r")) as response:
+            code = response.status
+            await response.read()
+        stats = (await get_json(s, url + "/stats"))[0]
+        assert code == 502
+        assert stats["accepted"] == stats["completed"] + stats["cancelled"] + stats["ollama"]["backend_errors"]
+    asyncio.run(with_relay(ollama_for_relay(), client))
+
+
+# ---------- P1 검토 11/26: 마지막 조각의 eval_count 경우별 정산 ----------
+
+MISSING = object()          # eval_count 키가 아예 없음 (Ollama는 0인 값을 응답에서 뺀다)
+
+
+def inject_final(monkeypatch, final, chunks):
+    """stream_generate 대신 조각 chunks개와 마지막 조각 final을 받은 것으로 한다 (워밍업은 그대로)."""
+    async def fake(session, cfg, payload, result):
+        result.status, result.chunks, result.final = 200, chunks, final
+        result.first_chunk = result.finished = time.perf_counter()
+
+    monkeypatch.setattr(real_adapter, "stream_generate", fake)
+
+
+@pytest.mark.parametrize("eval_count, code, settled", [
+    (MISSING, 200, 2),                  # 키 없음: 조각 수 min(2, 64)
+    (0, 200, 0), (64, 200, 64),         # 경계: 0 이상 상한(64) 이하는 정상
+    (None, 502, 2), ("5", 502, 2), (2.5, 502, 2), (True, 502, 2), (-1, 502, 2), (65, 502, 2),  # 조각 수로 한 번만
+], ids=["missing", "zero", "maximum", "null", "string", "float", "bool", "negative", "over_maximum"])
+def test_eval_count_cases_are_settled_once(monkeypatch, tmp_path, eval_count, code, settled):
+    final = {"done": True, "done_reason": "stop"}
+    if eval_count is not MISSING:
+        final["eval_count"] = eval_count
+    inject_final(monkeypatch, final, chunks=2)
+
+    async def client(s, url):
+        return await post(s, url, request_body("r")), (await get_json(s, url + "/stats"))[0]   # 출력 상한 64
+
+    config = ServerConfig(output_refill_rate=0.000001)      # 출력 버킷이 거의 다시 차지 않게 (잔량을 손으로 계산)
+    (status, body, _), stats = asyncio.run(with_relay(ollama_for_relay(), client, config=config, log_dir=tmp_path))
+    assert status == code
+    if code == 200:
+        assert body["output_tokens"] == settled
+    else:
+        assert body["backend_error"] == "invalid_response"
+    assert stats["accepted"] == stats["completed"] + stats["cancelled"] + stats["ollama"]["backend_errors"] == 1
+    assert stats["active"] == stats["output_tokens_reserved"] == 0
+    assert stats["output_tokens_consumed"] == settled
+    assert stats["quotas"]["output_tokens"]["remaining"] == pytest.approx(1000 - settled, abs=0.01)  # 안 쓴 예약은 환불
+    assert_totals_match(stats)
+    row = read_csv(tmp_path / f"relay_requests_{stats['run_id']}.csv")[0]
+    assert (row["status"], row["output_tokens"]) == (str(code), str(settled))
+    if code == 502:
+        assert row["error"] == f"invalid_response eval_count={eval_count!r}"       # message에 받은 값
+
+
+def test_odd_prompt_eval_count_and_done_reason_do_not_fail_request(monkeypatch):
+    inject_final(monkeypatch, {"done": True, "eval_count": 3, "prompt_eval_count": "125",
+                               "done_reason": ["stop"]}, chunks=3)
+
+    async def client(s, url):
+        return await post(s, url, request_body("r")), (await get_json(s, url + "/stats"))[0]
+
+    (status, body, _), stats = asyncio.run(with_relay(ollama_for_relay(), client))
+    assert status == 200 and body["output_tokens"] == 3
+    assert stats["ollama"]["prompt_eval_count_total"] == 0         # 0 이상 정수가 아니면 합에 더하지 않는다
+    assert stats["ollama"]["done_reasons"] == {'["stop"]': 1}      # 문자열이 아니면 JSON 표기를 키로
+    assert (stats["completed"], stats["active"], stats["output_tokens_reserved"]) == (1, 0, 0)
+    assert_totals_match(stats)
