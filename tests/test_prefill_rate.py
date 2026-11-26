@@ -64,10 +64,12 @@ def test_main_prints_table_fit_and_dropped(tmp_path, capsys):
     assert "중앙값: 30" in out                              # 130 − 100, 1130 − 1100
 
 
-def test_main_needs_two_sizes(tmp_path, capsys):
-    write(tmp_path, ROWS[:3])
+def test_main_needs_two_different_counts(tmp_path, capsys):
+    write(tmp_path, ROWS[:3])                               # 크기 하나
     assert prefill_rate.main([str(tmp_path)]) == 1
-    assert "크기가 2개 이상" in capsys.readouterr().out
+    write(tmp_path, [row(100, 12, 0.25), row(8000, 12, 0.25)])  # 크기 둘인데 값이 같음 (잘림 의심)
+    assert prefill_rate.main([str(tmp_path)]) == 1
+    assert capsys.readouterr().out.count("2가지 이상이어야 직선을 맞춘다") == 2
 
 
 def test_probe_through_relay_with_long_input(tmp_path):

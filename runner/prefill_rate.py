@@ -74,8 +74,9 @@ def main(argv=None) -> int:
     print("입력  건수  prompt_eval_count  prefill(초)  토큰당(초)  덧붙는 토큰   (모두 중앙값)")
     for size, n, count, prefill in sizes:
         print(f"{size:>5} {n:>5} {count:>18.0f} {prefill:>12.4f} {prefill / count:>11.6f} {count - size:>12.0f}")
-    if len({count for _, _, count, _ in sizes}) < 2:
-        print("크기가 2개 이상이어야 직선을 맞춘다")
+    if len({count for _, _, count, _ in sizes}) < 2:          # x가 모두 같으면 기울기를 정할 수 없다
+        print("prompt_eval_count 중앙값이 2가지 이상이어야 직선을 맞춘다 "
+              "(크기가 여럿인데 값이 모두 같으면 relay CSV의 input_tokens·prompt_eval_count 열을 확인)")
         return 1
     intercept, slope = fit_line([(count, prefill) for _, _, count, prefill in sizes])
     print(f"직선 맞춤(크기 {len(sizes)}개의 중앙값): prefill ≈ {intercept:.4f}초 + {slope:.6f}초 × prompt_eval_count")
