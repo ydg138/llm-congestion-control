@@ -3,7 +3,7 @@
 예:
     python -m runner.run --exp minimum                          # E1·E3 × 시드 1~5 (35회)
     python -m runner.run --exp E1 --controller C2 --seed 1
-    python -m runner.run --exp E3 --controller C2 --seed 1 --tasks 10 --backend ollama   # E6 (Ollama를 먼저 켬)
+    python -m runner.run --exp E6 --seed 1 --backend ollama     # E6 (Ollama를 먼저 켬, docs/e6_runbook.md)
 
 서버는 이 저장소의 server/를 .venv\\Scripts\\python.exe로 띄운다. 다른 서버 폴더는 --server-dir로 준다.
 --backend ollama면 가짜 서버 대신 Ollama 중계 서버(runner/real_adapter.py)를 실행마다 새로 띄운다.
@@ -28,7 +28,7 @@ from pathlib import Path
 from client.factory import make_controller
 from runner.agent import Agent, Progress
 from runner.check_run import compare, read_run
-from runner.experiments import EXPERIMENTS, SEEDS, Condition, select
+from runner.experiments import E6_SEEDS, EXPERIMENTS, SEEDS, Condition, select
 from runner.relay_rules import RelayConfig, context_size
 from runner.request_log import RequestLog, log_path
 from runner.server_proc import ServerTimes, free_port, get_json, start_server, stop_server, wait_ready
@@ -200,7 +200,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="실험 조건(runner/experiments.py)을 시드별로 반복해 돌린다")
     p.add_argument("--exp", required=True, choices=sorted(EXPERIMENTS), help="minimum은 E1 + E3")
     p.add_argument("--controller", help="이 컨트롤러 조건만 (예: C2, C0-8)")
-    p.add_argument("--seed", type=int, help=f"이 시드만 (생략하면 {SEEDS})")
+    p.add_argument("--seed", type=int, help=f"이 시드만 (생략하면 {SEEDS}, E6는 {E6_SEEDS})")
     p.add_argument("--tasks", type=int, help="에이전트당 작업 수 덮어쓰기 (빠른 확인용)")
     p.add_argument("--server-dir", type=Path, default=REPO,
                    help="서버 폴더 (server/와 .venv 포함). 생략하면 이 저장소")

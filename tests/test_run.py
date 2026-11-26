@@ -7,15 +7,17 @@ http.server를 스레드로 띄운다. 명령줄 인자의 기본값도 확인�
 import csv
 import json
 import threading
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
 
+from runner import e4_check
 from runner.agent import AgentSpec
-from runner.experiments import E1, E1_SERVER, E3, Condition
+from runner.experiments import E1, E1_SERVER, E3, E6, Condition
 from runner.request_log import RequestLog
-from runner.run import Backend, parse_args, run_experiment, run_once, save_stats, server_launch
+from runner.run import REPO, Backend, check, parse_args, run_experiment, run_once, save_stats, server_launch
 from runner.server_proc import ServerTimes, free_port, server_command
 from runner.watchdog import Limits
 
@@ -182,3 +184,24 @@ def test_attach_runs_on_existing_server_without_starting_one(server, tmp_path):
     assert (row["run_id"], row["status"]) == ("fake", "completed")
     assert (tmp_path / row["csv"]).is_file()
     assert (tmp_path / row["csv"].replace(".csv", "_stats.json")).is_file()
+
+
+# ---------- E6 ----------
+
+def test_e6_relay_num_ctx_is_4096():
+    # heavy_in: 1500 + 64 + 256 = 1820 → 최소 4096 (긴 입력 측정의 16384와 다르다)
+    assert server_launch(E6[0], Backend("ollama"))[1][-1] == "4096"
+
+
+@pytest.mark.skipif(not (REPO / ".venv" / "Scripts" / "python.exe").is_file(),
+                    reason="서버를 띄울 .venv가 없음 (Windows)")
+def test_e6_one_run_on_mock_backend(tmp_path):
+    """--backend mock(기본)으로 E6-input C2 한 건. 노트북 리허설과 같은 경로 (서버를 실제 프로세스로 띄움)."""
+    cond = replace(E6[0], tasks=5)                          # --tasks 5와 같은 빠른 확인
+    assert (cond.exp, cond.label) == ("E6-input", "C2")
+    row = run_once(cond, 1, tmp_path, REPO, Limits(max_seconds=60))
+    assert row["status"] == "completed", row["reason"]
+    run = {"exp": cond.exp, "controller": cond.label, "seed": 1, **row, "check": check(tmp_path / row["csv"])}
+    assert run["check"] == "OK"
+    # e4_check가 E6 결과 폴더에서도 돈다. 줄 앞부분만 본다 (PR #25가 뒤에 열을 붙임)
+    assert e4_check.check_run(tmp_path, run).startswith("E6-input C2 seed1: completed·대조 OK | 같이 돈 구간")

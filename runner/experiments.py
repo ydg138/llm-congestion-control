@@ -1,6 +1,6 @@
 """실험 조건 정의. 실행은 runner/run.py가 한다 (python -m runner.run --exp minimum ...).
 
-조건 하나 = 서버를 한 번 새로 띄워 돌리는 단위. 같은 조건을 시드만 바꿔 SEEDS만큼 반복한다.
+조건 하나 = 서버를 한 번 새로 띄워 돌리는 단위. 같은 조건을 시드만 바꿔 SEEDS만큼 반복한다 (E6는 E6_SEEDS).
 같은 시드면 모든 컨트롤러가 같은 작업을 받으므로, 결과 차이는 컨트롤러에서 온 것이라고 말할 수 있다.
 """
 
@@ -49,12 +49,41 @@ E4_CONTROLLERS = tuple(c for c in ("C2", "C3") if c in NAMES)
 #   input: 초당 5000토큰을 반씩(토큰 공정) → light 2500/100 = 초당 25건 → 750개면 약 30초
 #          그 뒤 heavy_in이 혼자 남은 작업을 하므로 실행 하나는 약 165초 (750 × 1100토큰 ÷ 5000)
 E4_TASKS = {"input": 750, "requests": 300}
-E4 = [Condition(f"E4-{neck}", c, (AgentSpec("a1", "light", c), AgentSpec("a2", "heavy_in", c)),
-                E4_TASKS[neck], server)
+
+
+def light_and_heavy(controller: str) -> tuple[AgentSpec, ...]:
+    """E4·E6의 에이전트 묶음: light 1개 + heavy_in 1개가 같은 컨트롤러로 동시에 시작."""
+    return (AgentSpec("a1", "light", controller), AgentSpec("a2", "heavy_in", controller))
+
+
+E4 = [Condition(f"E4-{neck}", c, light_and_heavy(c), E4_TASKS[neck], server)
       for neck, server in E4_SERVERS.items() for c in E4_CONTROLLERS]
 
-EXPERIMENTS = {"E1": E1, "E3": E3, "E4": E4,
-               "minimum": E1 + E3}                          # minimum: 최소 단계 관문 (E4는 넣지 않음)
+# E6: E4 축소판을 실제 Ollama에서 (--backend ollama, 중계 서버 runner/real_adapter.py가 한도를 검사).
+# --backend mock(기본)이면 같은 설정으로 가짜 서버가 돈다 (노트북 리허설용. slots·지연 모델은 Ollama에 맞춤)
+# 한도 값은 실측 전 추정치다. 주말에 데스크탑에서 seed 1로 보정한다 (docs/e6_runbook.md 5단계)
+#   근거(11/20~21 측정, 동시 1): warm TTFT 0.014초, 출력 토큰당 0.0063초 → 요청 하나(출력 평균 40) 약 0.27초
+#   병렬 4인 Ollama는 동시 디코드로 느려지는 것까지 쳐서 초당 9건 안팎을 처리한다고 본다.
+#   한도가 그보다 충분히 낮아야 429가 나고, Ollama 대기열이 병목이 되지 않는다
+E6_SERVERS = {
+    # 입력 토큰 초당 1000, 용량 2000만 먼저 참. 용량은 heavy_in 최대 입력 1500 이상이어야 한다 (아니면 422)
+    #   C3(토큰 공정)면 light 500/100 = 초당 5건 + heavy 500/1000 = 0.5건 → Ollama에 초당 약 5.5건
+    "input": CONFIGS / "e6_input.json",
+    "requests": CONFIGS / "e6_requests.json",     # 요청 초당 4건, 용량 4만 먼저 참
+}
+E6_MEASURE = CONFIGS / "e6_measure.json"        # 긴 입력 측정용: 모든 한도 넉넉 (입력 8000 한 건 통과). 실험 조건 아님
+# 에이전트당 작업 수
+#   input: 100 × 100 + 100 × 1000 = 110,000토큰 ÷ 초당 1000 = 실행 하나 약 110초 (C3면 light는 100 ÷ 5 = 약 20초에 끝남)
+#   requests: 200건 ÷ 초당 4건 = 약 50초
+#   → 시드 하나(4회) 약 6분, 시드 3개 약 20분
+E6_TASKS = {"input": 100, "requests": 100}
+E6 = [Condition(f"E6-{neck}", c, light_and_heavy(c), E6_TASKS[neck], server)
+      for neck, server in E6_SERVERS.items() for c in E4_CONTROLLERS]
+E6_SEEDS = (1, 2, 3)                    # 실제 Ollama는 오래 걸려 3회 (SEEDS와 따로)
+
+EXPERIMENTS = {"E1": E1, "E3": E3, "E4": E4, "E6": E6,
+               "minimum": E1 + E3}                          # minimum: 최소 단계 관문 (E4·E6는 넣지 않음)
+EXP_SEEDS = {"E6": E6_SEEDS}            # 반복 횟수가 SEEDS와 다른 실험
 
 
 def select(exp: str, controller: str | None = None,
@@ -64,5 +93,5 @@ def select(exp: str, controller: str | None = None,
     실행 중에 PC가 바빠져도 한 컨트롤러에만 몰리지 않고 모든 조건에 고르게 퍼진다.
     """
     conds = [c for c in EXPERIMENTS[exp] if controller is None or c.label == controller]
-    seeds = SEEDS if seed is None else (seed,)
+    seeds = EXP_SEEDS.get(exp, SEEDS) if seed is None else (seed,)
     return [(c, s) for s in seeds for c in conds]
