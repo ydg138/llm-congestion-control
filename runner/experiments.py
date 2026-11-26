@@ -13,7 +13,7 @@ from runner.agent import AgentSpec
 CONFIGS = Path(__file__).resolve().parent / "configs"
 # docs/week12.md 제안: 지연 약 0.8초 × 한도 초당 10건 → 적정 동시성 약 8, 요청 수 한도가 병목
 E1_SERVER = CONFIGS / "e1_server.json"
-# E4 병목 2종 (docs/week13.md "E4 서버 설정"). 지금은 P3 임시값, P1 설정이 오면 이 두 파일을 바꾼다
+# E4 병목 2종 (docs/week13.md "E4 서버 설정"). P1 검토(11/26) 후 확정
 E4_SERVERS = {
     "input": CONFIGS / "e4_input.json",         # 입력 토큰 한도(초당 5000)만 먼저 참, 요청·출력은 넉넉
     "requests": CONFIGS / "e4_requests.json",   # 요청 수 한도(초당 20건, 용량 10)만 먼저 참, 입력·출력은 넉넉
