@@ -100,7 +100,7 @@ $env:OLLAMA_NUM_PARALLEL = "4"
 ollama serve
 ```
 
-**확인**: `server config` 줄에 `OLLAMA_NUM_PARALLEL:4`. 아니면 1단계처럼 끄고 다시 켠다. 병렬 1이면 Ollama가 초당 약 3.7건밖에 처리하지 못해 E6-requests 한도(초당 4건)보다 느려지므로 반드시 4여야 한다.
+**확인**: `server config` 줄에 `OLLAMA_NUM_PARALLEL:4`. 아니면 1단계처럼 끄고 다시 켠다. 병렬 1이면 Ollama가 초당 약 3.7건밖에 처리하지 못해 E6-requests 한도(초당 3건)보다 느려지므로 반드시 4여야 한다.
 
 ## 5. E6 seed 1 보정
 
@@ -132,7 +132,7 @@ E6-input의 대기 추정을 기록만 하는 이유: 처음 약 10초 동안 li
 - 적재 최대: 0에 가까워야 한다 (실행 중에 모델을 다시 올리지 않음).
 
 **기준을 못 넘으면**:
-- E6-requests의 대기 추정이 10% 이상: `e6_requests.json`의 `capacity`·`refill_rate`를 4 → 3으로 낮춘다.
+- E6-requests의 대기 추정이 10% 이상: `e6_requests.json`의 `capacity`·`refill_rate`를 4 → 3으로 낮춘다 (11/27 적용. 3에서도 10% 이상이면 2로).
 - 의도하지 않은 버킷이 바닥: 그 버킷을 키운다. 단 `e6_input.json`의 `input_capacity`는 heavy_in 최대 입력 1500 이상이어야 한다 (아니면 422).
 - 502·invalid_response·529·취소가 있음: 본 실행을 미루고 `$R\server\relay_requests_*.csv`의 error 열을 본다.
 - 값을 바꾸면 JSON만 고치고 seed 1을 다시 돌린다. 그다음 `tests/test_experiments.py`의 `test_e6_configs_by_hand` 값과 `runner/experiments.py`의 손계산 주석(초당 4건, 50초 등)을 맞추고, `pytest -q` 통과 후 바꾸기 전후 값과 이유를 적어 커밋한다.

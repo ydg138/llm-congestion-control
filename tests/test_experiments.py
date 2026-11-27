@@ -137,7 +137,7 @@ def test_e6_configs_by_hand():
     assert per_second(cfg, 100) == {"requests": 200, "input_tokens": 10, "output_tokens": 312.5}
     assert cfg["input_capacity"] == 2000
     cfg = json.loads(E6_SERVERS["requests"].read_text(encoding="utf-8"))
-    assert (cfg["refill_rate"], cfg["capacity"]) == (4, 4)
+    assert (cfg["refill_rate"], cfg["capacity"]) == (3, 3)
 
 
 def test_e6_measure_passes_one_long_request():

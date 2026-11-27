@@ -65,6 +65,7 @@ E4 = [Condition(f"E4-{neck}", c, light_and_heavy(c), E4_TASKS[neck], server)
 #   근거(11/20~21 측정, 동시 1): warm TTFT 0.014초, 출력 토큰당 0.0063초 → 요청 하나(출력 평균 40) 약 0.27초
 #   병렬 4인 Ollama는 동시 디코드로 느려지는 것까지 쳐서 초당 9건 안팎을 처리한다고 본다.
 #   한도가 그보다 충분히 낮아야 429가 나고, Ollama 대기열이 병목이 되지 않는다
+# 11/27 보정(데스크탑 실측): 병렬 4 동시 디코드는 출력 토큰당 0.011~0.014초. 초당 4건이면 E6-requests C3 대기 추정 16%(a2 31%)라 3건으로 낮춤(대기 0%).
 E6_SERVERS = {
     # 입력 토큰 초당 1000, 용량 2000만 먼저 참. 용량은 heavy_in 최대 입력 1500 이상이어야 한다 (아니면 422)
     #   Ollama 부하 상한: light만 보내면 1000 ÷ 100 = 초당 10건 이상 (처음에는 용량 2000만큼 더).
@@ -73,13 +74,13 @@ E6_SERVERS = {
     #   heavy 한 건(입력 약 1000)이 충전 1초 분량이라(E4는 1000 ÷ 5000 = 0.2초), 잔량이 적을 때
     #   큰 요청만 막히는 현상이 E4보다 강하다 (리허설: heavy 429 약 4,800번)
     "input": CONFIGS / "e6_input.json",
-    "requests": CONFIGS / "e6_requests.json",     # 요청 초당 4건, 용량 4만 먼저 참
+    "requests": CONFIGS / "e6_requests.json",     # 요청 초당 3건, 용량 3만 먼저 참 (11/27 보정)
 }
 E6_MEASURE = CONFIGS / "e6_measure.json"        # 긴 입력 측정용: 모든 한도 넉넉 (입력 8000 한 건 통과). 실험 조건 아님
 # 에이전트당 작업 수
 #   input: 100 × 100 + 100 × 1000 = 110,000토큰 ÷ 초당 1000 = 실행 하나 약 110초
 #          (light는 리허설에서 8~10초에 끝나 같이 도는 구간이 짧다. 나머지는 heavy 혼자)
-#   requests: 200건 ÷ 초당 4건 = 약 50초
+#   requests: 200건 ÷ 초당 3건 = 약 67초
 #   → 시드 하나(4회) 약 6분, 시드 3개 약 20분
 E6_TASKS = {"input": 100, "requests": 100}
 E6 = [Condition(f"E6-{neck}", c, light_and_heavy(c), E6_TASKS[neck], server)

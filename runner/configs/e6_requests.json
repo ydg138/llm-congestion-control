@@ -1,6 +1,6 @@
 {
-  "capacity": 4,
-  "refill_rate": 4.0,
+  "capacity": 3,
+  "refill_rate": 3.0,
   "input_capacity": 100000,
   "input_refill_rate": 100000.0,
   "output_capacity": 20000,
