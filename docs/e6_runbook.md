@@ -100,7 +100,7 @@ $env:OLLAMA_NUM_PARALLEL = "4"
 ollama serve
 ```
 
-**확인**: `server config` 줄에 `OLLAMA_NUM_PARALLEL:4`. 아니면 1단계처럼 끄고 다시 켠다. 병렬 1이면 Ollama가 초당 약 3.7건밖에 처리하지 못해 E6-requests 한도(초당 3건)보다 느려지므로 반드시 4여야 한다.
+**확인**: `server config` 줄에 `OLLAMA_NUM_PARALLEL:4`. 아니면 1단계처럼 끄고 다시 켠다. 병렬 1이면 Ollama가 요청을 하나씩 처리해 초당 약 3.7건이 한계이고(heavy는 prefill이 더해져 더 느림), E6-requests 한도(초당 3건)와 여유가 거의 없어 대기열이 쌓이므로 반드시 4여야 한다.
 
 ## 5. E6 seed 1 보정
 
