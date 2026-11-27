@@ -7,15 +7,18 @@ http.server를 스레드로 띄운다. 명령줄 인자의 기본값도 확인�
 import csv
 import json
 import threading
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
 
+from runner import e4_check, relay_check
 from runner.agent import AgentSpec
+from runner.experiments import E1, E1_SERVER, E3, E6, Condition
 from runner.request_log import RequestLog
-from runner.run import parse_args, run_experiment, save_stats
-from runner.server_proc import free_port
+from runner.run import REPO, Backend, check, parse_args, run_experiment, run_once, save_stats, server_launch
+from runner.server_proc import ServerTimes, free_port, server_command
 from runner.watchdog import Limits
 
 
@@ -136,3 +139,70 @@ def test_runner_saved_even_if_server_is_gone(tmp_path):
     outcome = {"status": "aborted", "reason": "안전장치: 30초 동안 완료 없음"}
     assert save_stats(f"http://127.0.0.1:{free_port()}", path, outcome) is None
     assert json.loads(path.read_text(encoding="utf-8"))["runner"] == outcome
+
+
+# ---------- --backend ollama, --base-url (E6) ----------
+
+def test_mock_backend_command_is_unchanged(tmp_path):
+    module, extra, times = server_launch(E1[0], Backend())
+    cmd = server_command(Path("py.exe"), 8000, tmp_path, None, module, extra)
+    assert cmd == ["py.exe", "-u", "-m", "server.mock_llm", "--port", "8000", "--log-dir", str(tmp_path.resolve())]
+    assert times == ServerTimes()                                   # 준비 대기도 지금과 같음 (15초)
+
+
+def test_ollama_backend_starts_relay_with_fixed_num_ctx(tmp_path):
+    config = tmp_path / "c.json"
+    module, extra, times = server_launch(E3[0], Backend("ollama"))
+    cmd = server_command(Path("py.exe"), 8001, tmp_path, config, module, extra)
+    assert cmd[2:4] == ["-m", "runner.real_adapter"] and cmd[cmd.index("--config") + 1] == str(config.resolve())
+    # light 에이전트: 150 + 64 + 256 = 470 → 최소 4096
+    assert extra == ["--model", "llama3.1:8b", "--ollama-url", "http://127.0.0.1:11434", "--num-ctx", "4096"]
+    assert times.ready_seconds == 120                               # 워밍업(모델 적재)까지 기다림
+    assert server_launch(E3[0], Backend("ollama", num_ctx=8192))[1][-1] == "8192"   # 직접 주면 그 값
+
+
+def test_base_url_only_for_a_single_run(tmp_path):
+    attach = ["--base-url", "http://127.0.0.1:1"]
+    with pytest.raises(SystemExit):
+        parse_args(["--exp", "E1", *attach])                        # 실행 30개 → 대조가 맞지 않음
+    assert parse_args(["--exp", "E1", "--controller", "C2", "--seed", "1", *attach]).base_url == attach[1]
+    for extra in (["--backend", "ollama"], ["--server-dir", str(tmp_path)]):
+        with pytest.raises(SystemExit):                             # 서버를 띄우지 않으므로 함께 쓸 수 없음
+            parse_args(["--exp", "E3", "--seed", "1", *attach, *extra])
+
+
+def test_ollama_backend_needs_relay_code(tmp_path):
+    with pytest.raises(SystemExit):
+        parse_args(["--exp", "E3", "--backend", "ollama", "--server-dir", str(tmp_path)])
+    assert parse_args(["--exp", "E3", "--backend", "ollama"]).backend == "ollama"   # 이 저장소에는 있다
+
+
+def test_attach_runs_on_existing_server_without_starting_one(server, tmp_path):
+    cond = Condition("T", "C2", (AgentSpec("a1", "light", "C2"),), 3, E1_SERVER)
+    # 서버 폴더가 없어도 된다: 서버를 띄우지 않는다는 뜻
+    row = run_once(cond, 1, tmp_path, tmp_path / "없는 폴더", Limits(), attach_url=url(server))
+    assert (row["run_id"], row["status"]) == ("fake", "completed")
+    assert (tmp_path / row["csv"]).is_file()
+    assert (tmp_path / row["csv"].replace(".csv", "_stats.json")).is_file()
+
+
+# ---------- E6 ----------
+
+def test_e6_relay_num_ctx_is_4096():
+    # heavy_in: 1500 + 64 + 256 = 1820 → 최소 4096 (긴 입력 측정의 16384와 다르다)
+    assert server_launch(E6[0], Backend("ollama"))[1][-1] == "4096"
+
+
+@pytest.mark.skipif(not (REPO / ".venv" / "Scripts" / "python.exe").is_file(),
+                    reason="서버를 띄울 .venv가 없음 (Windows)")
+def test_e6_one_run_on_mock_backend(tmp_path):
+    """--backend mock(기본)으로 E6-input C2 한 건. 노트북 리허설과 같은 경로 (서버를 실제 프로세스로 띄움)."""
+    cond = replace(E6[0], tasks=5)                          # --tasks 5와 같은 빠른 확인
+    assert (cond.exp, cond.label) == ("E6-input", "C2")
+    row = run_once(cond, 1, tmp_path, REPO, Limits(max_seconds=60))
+    assert row["status"] == "completed", row["reason"]
+    run = {"exp": cond.exp, "controller": cond.label, "seed": 1, **row, "check": check(tmp_path / row["csv"])}
+    assert run["check"] == "OK"
+    # e4_check가 E6 결과 폴더에서도 돈다. 줄 앞부분만 본다 (PR #25가 뒤에 열을 붙임)
+    assert e4_check.check_run(tmp_path, run).startswith("E6-input C2 seed1: completed·대조 OK | 같이 돈 구간")
+    assert "중계 서버 CSV 없음" in relay_check.check_run(tmp_path, run, 4)     # 가짜 서버는 relay CSV를 쓰지 않음

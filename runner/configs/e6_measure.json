@@ -1,0 +1,17 @@
+{
+  "capacity": 100,
+  "refill_rate": 100.0,
+  "input_capacity": 100000,
+  "input_refill_rate": 100000.0,
+  "output_capacity": 20000,
+  "output_refill_rate": 20000.0,
+  "slots": 4,
+  "queue_size": 512,
+  "service_delay": 0.0,
+  "seed": 42,
+  "output_min": 16,
+  "output_max": 64,
+  "base_ttft": 0.014,
+  "input_token_seconds": 0.0001,
+  "output_token_seconds": 0.0063
+}
